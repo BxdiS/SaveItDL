@@ -17,6 +17,7 @@ class Config:
     enabled_platforms: list[str] = field(default_factory=lambda: ["telegram"])
     max_workers: int = 4
     queue_size: int = 100
+    admin_id: int | None = None
 
     @classmethod
     def from_env(cls) -> Config:
@@ -28,4 +29,5 @@ class Config:
             enabled_platforms=[p.strip() for p in enabled.split(",")],
             max_workers=int(os.getenv("MAX_WORKERS", "4")),
             queue_size=int(os.getenv("QUEUE_SIZE", "100")),
+            admin_id=int(os.getenv("ADMIN_ID", "0")) or None,
         )
