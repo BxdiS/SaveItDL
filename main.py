@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import signal
 import shutil
 import sys
 
@@ -25,14 +24,6 @@ MAX_RESTART_ATTEMPTS = 5
 RESTART_DELAY_BASE = 5
 
 
-_shutdown = False
-
-
-def _handle_sigterm():
-    global _shutdown
-    _shutdown = True
-
-
 async def run_platform_isolated(
     name: str,
     factory,
@@ -46,9 +37,8 @@ async def run_platform_isolated(
             if attempt > 0:
                 logger.info("Platform %s recovered on attempt %d", name, attempt + 1)
             await platform.start()
-            if _shutdown:
-                logger.info("Platform %s stopped (shutdown)", name)
-                return
+            logger.info("Platform %s stopped normally", name)
+            return
         except asyncio.CancelledError:
             logger.info("Platform %s shutting down", name)
             return
@@ -91,10 +81,6 @@ async def monitor_health(pool: WorkerPool, notifier: AdminNotifier, temp_dir: st
 
 
 async def main():
-    loop = asyncio.get_event_loop()
-    loop.add_signal_handler(signal.SIGTERM, _handle_sigterm)
-    loop.add_signal_handler(signal.SIGINT, _handle_sigterm)
-
     cfg = Config.from_env()
     notifier = AdminNotifier(admin_id=cfg.admin_id)
     stats = StatsDB(db_path=cfg.stats_db)
