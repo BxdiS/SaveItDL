@@ -17,6 +17,7 @@ class DownloadJob:
     url: str
     media_format: MediaFormat
     callback: Callable[[DownloadResult], Coroutine[Any, Any, None]]
+    format_id: str | None = None
 
 
 class WorkerPool:
@@ -62,7 +63,7 @@ class WorkerPool:
         async with self._semaphore:
             self._active += 1
             try:
-                result = await self._downloader.download(job.url, job.media_format)
+                result = await self._downloader.download(job.url, job.media_format, format_id=job.format_id)
                 await job.callback(result)
             except Exception:
                 logger.exception("Worker error for %s", job.url)

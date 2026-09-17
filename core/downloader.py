@@ -59,6 +59,7 @@ class Downloader:
         url: str,
         media_format: MediaFormat = MediaFormat.VIDEO,
         on_progress: Callable[[DownloadStatus, float], None] | None = None,
+        format_id: str | None = None,
     ) -> DownloadResult:
         file_id = uuid.uuid4().hex[:12]
         output_template = str(Path(self._temp_dir) / f"{file_id}.%(ext)s")
@@ -73,7 +74,17 @@ class Downloader:
             "retries": 3,
         }
 
-        if media_format == MediaFormat.AUDIO:
+        if format_id:
+            opts["format"] = format_id
+            if media_format == MediaFormat.AUDIO:
+                opts["postprocessors"] = [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "192",
+                }]
+            else:
+                opts["merge_output_format"] = "mp4"
+        elif media_format == MediaFormat.AUDIO:
             opts.update({
                 "format": "bestaudio/best",
                 "postprocessors": [{
