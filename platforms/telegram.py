@@ -769,12 +769,34 @@ class TelegramPlatform(BasePlatform):
 
             filesize = result.filesize or 0
             if filesize > TELEGRAM_FILE_LIMIT:
-                await status_msg.edit_text(
-                    f"❌ Файл слишком большой ({_format_size(filesize)}). "
-                    f"Лимит Telegram — 50 МБ."
-                )
                 self.downloader.cleanup(result)
-                return
+                if media_format == MediaFormat.VIDEO and not format_id:
+                    await status_msg.edit_text(
+                        f"⚠️ Файл {_format_size(filesize)} — слишком большой.\n"
+                        f"⬇️ <i>Пробую в пониженном качестве...</i>",
+                        parse_mode="HTML",
+                    )
+                    retry_result = await self.downloader.download(
+                        url, media_format,
+                        format_id="bestvideo[filesize<50M]+bestaudio/best[filesize<50M]/worst",
+                        download_range=download_range,
+                    )
+                    if retry_result.success and retry_result.filesize and retry_result.filesize <= TELEGRAM_FILE_LIMIT:
+                        result = retry_result
+                    else:
+                        if retry_result.file_path:
+                            self.downloader.cleanup(retry_result)
+                        await status_msg.edit_text(
+                            f"❌ Файл слишком большой даже в мин. качестве.\n"
+                            f"Лимит Telegram — 50 МБ."
+                        )
+                        return
+                else:
+                    await status_msg.edit_text(
+                        f"❌ Файл слишком большой ({_format_size(filesize)}). "
+                        f"Лимит Telegram — 50 МБ."
+                    )
+                    return
 
             await status_msg.edit_text("📤 <i>Загружаю в Telegram...</i>", parse_mode="HTML")
 
