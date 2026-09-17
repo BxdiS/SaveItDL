@@ -126,9 +126,16 @@ async def main():
         logger.error("No platforms enabled")
         sys.exit(1)
 
-    tasks.append(asyncio.create_task(pool.start()))
-    tasks.append(asyncio.create_task(monitor_health(pool, notifier, cfg.temp_dir)))
-    await asyncio.gather(*tasks)
+    bg_tasks = [
+        asyncio.create_task(pool.start()),
+        asyncio.create_task(monitor_health(pool, notifier, cfg.temp_dir)),
+    ]
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for t in bg_tasks:
+            t.cancel()
+        await asyncio.gather(*bg_tasks, return_exceptions=True)
 
 
 if __name__ == "__main__":

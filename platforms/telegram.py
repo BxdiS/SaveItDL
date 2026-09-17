@@ -154,7 +154,7 @@ def _build_audio_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-BANNER_PATH = "assets/banner.jpg"
+BANNER_PATH = Path(__file__).resolve().parent.parent / "assets" / "banner.jpg"
 
 WELCOME_TEXT = (
     "🎬 <b>SaveItDL</b>\n\n"
