@@ -245,14 +245,23 @@ class TelegramPlatform(BasePlatform):
             if self._stats:
                 await self._stats.track_action(message.from_user.id, "start", start_param)
 
-            banner = Path(BANNER_PATH)
+            banner = BANNER_PATH
+            logger.info("Banner path: %s, exists: %s", banner, banner.exists())
             if banner.exists():
-                await message.answer_photo(
-                    photo=FSInputFile(banner),
-                    caption=WELCOME_TEXT,
-                    parse_mode="HTML",
-                    reply_markup=WELCOME_KEYBOARD,
-                )
+                try:
+                    await message.answer_photo(
+                        photo=FSInputFile(banner),
+                        caption=WELCOME_TEXT,
+                        parse_mode="HTML",
+                        reply_markup=WELCOME_KEYBOARD,
+                    )
+                except Exception as e:
+                    logger.exception("Failed to send banner")
+                    await message.answer(
+                        WELCOME_TEXT,
+                        parse_mode="HTML",
+                        reply_markup=WELCOME_KEYBOARD,
+                    )
             else:
                 await message.answer(
                     WELCOME_TEXT,
