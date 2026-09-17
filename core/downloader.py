@@ -22,10 +22,23 @@ class Downloader:
         self._temp_dir = temp_dir or tempfile.mkdtemp(prefix="alldl_")
         Path(self._temp_dir).mkdir(parents=True, exist_ok=True)
 
-    async def get_info(self, url: str) -> MediaInfo:
-        opts = {
+    def _base_opts(self) -> dict:
+        return {
             "quiet": True,
             "no_warnings": True,
+            "http_headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+            },
+            "age_limit": None,
+        }
+
+    async def get_info(self, url: str) -> MediaInfo:
+        opts = {
+            **self._base_opts(),
             "skip_download": True,
         }
         loop = asyncio.get_event_loop()
@@ -67,9 +80,8 @@ class Downloader:
         output_template = str(Path(self._temp_dir) / f"{file_id}.%(ext)s")
 
         opts: dict = {
+            **self._base_opts(),
             "outtmpl": output_template,
-            "quiet": True,
-            "no_warnings": True,
             "noplaylist": True,
             "max_filesize": MAX_FILESIZE,
             "socket_timeout": 30,
