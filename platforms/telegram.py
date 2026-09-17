@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 from collections import OrderedDict
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command, CommandStart
@@ -152,18 +154,20 @@ def _build_audio_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+BANNER_PATH = "assets/banner.jpg"
+
 WELCOME_TEXT = (
-    "━━━━━━━━━━━━━━━━━━━━\n"
-    "    🎬  <b>SaveItDL</b>\n"
-    "━━━━━━━━━━━━━━━━━━━━\n\n"
-    "Скачивай медиа с любых платформ —\n"
-    "просто отправь ссылку.\n\n"
-    "▸ YouTube, TikTok, Instagram\n"
-    "▸ Twitter/X, Reddit, Facebook\n"
-    "▸ SoundCloud, VK, Rutube\n"
-    "▸ Twitch и 1000+ других\n\n"
-    "📎 <i>Вставь ссылку — и я сделаю всё сам.</i>"
+    "🎬 <b>SaveItDL</b>\n\n"
+    "Скачивай видео и аудио с любых платформ.\n"
+    "Просто отправь ссылку."
 )
+
+WELCOME_KEYBOARD = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="📎  Отправить ссылку", callback_data="menu:hint")],
+    [InlineKeyboardButton(text="📊  Моя статистика", callback_data="menu:stats")],
+    [InlineKeyboardButton(text="❓  Как пользоваться", callback_data="menu:help")],
+    [InlineKeyboardButton(text="📢  Канал обновлений", url="https://t.me/SaveItDLnews")],
+])
 
 HELP_TEXT = (
     "━━━━━━━━━━━━━━━━━━━━\n"
@@ -241,9 +245,22 @@ class TelegramPlatform(BasePlatform):
             if self._stats:
                 await self._stats.track_action(message.from_user.id, "start", start_param)
 
+            banner = Path(BANNER_PATH)
+            if banner.exists():
+                await message.answer_photo(
+                    photo=FSInputFile(banner),
+                    caption=WELCOME_TEXT,
+                    parse_mode="HTML",
+                    reply_markup=WELCOME_KEYBOARD,
+                )
+            else:
+                await message.answer(
+                    WELCOME_TEXT,
+                    parse_mode="HTML",
+                    reply_markup=WELCOME_KEYBOARD,
+                )
             await message.answer(
-                WELCOME_TEXT,
-                parse_mode="HTML",
+                "⬇️ Вставь ссылку:",
                 reply_markup=MAIN_KEYBOARD,
             )
 
@@ -281,6 +298,18 @@ class TelegramPlatform(BasePlatform):
                 await message.answer("⛔ Только для администратора.")
                 return
             await self._send_admin_errors(message)
+
+        @self.dp.callback_query(F.data.startswith("menu:"))
+        async def handle_menu(callback: types.CallbackQuery):
+            action = callback.data.split(":")[1]
+            if action == "hint":
+                await callback.answer("Просто отправь ссылку в чат!", show_alert=True)
+            elif action == "stats":
+                await callback.answer()
+                await self._send_user_stats(callback.message)
+            elif action == "help":
+                await callback.answer()
+                await callback.message.answer(HELP_TEXT, parse_mode="HTML")
 
         @self.dp.callback_query(F.data.startswith("adm:"))
         async def handle_admin_nav(callback: types.CallbackQuery):
