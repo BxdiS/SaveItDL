@@ -376,6 +376,66 @@ class StatsDB:
             """, (limit,)).fetchall()
             return [{"url": r[0], "platform": r[1], "error": r[2], "at": r[3]} for r in rows]
 
+    async def get_top_users(self, limit: int = 10) -> list[dict]:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._top_users_sync, limit)
+
+    def _top_users_sync(self, limit: int) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute("""
+                SELECT u.user_id, u.username, u.first_name,
+                       COUNT(d.id) as cnt,
+                       COALESCE(SUM(d.filesize), 0) as total_bytes
+                FROM users u
+                JOIN downloads d ON d.user_id = u.user_id AND d.success = 1
+                GROUP BY u.user_id
+                ORDER BY cnt DESC LIMIT ?
+            """, (limit,)).fetchall()
+            return [
+                {"user_id": r[0], "username": r[1], "first_name": r[2],
+                 "downloads": r[3], "total_bytes": r[4]}
+                for r in rows
+            ]
+
+    async def get_recent_users(self, limit: int = 10) -> list[dict]:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._recent_users_sync, limit)
+
+    def _recent_users_sync(self, limit: int) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute("""
+                SELECT user_id, username, first_name, language_code,
+                       is_premium, first_seen, start_param
+                FROM users ORDER BY first_seen DESC LIMIT ?
+            """, (limit,)).fetchall()
+            return [
+                {"user_id": r[0], "username": r[1], "first_name": r[2],
+                 "language": r[3], "is_premium": bool(r[4]),
+                 "first_seen": r[5], "start_param": r[6]}
+                for r in rows
+            ]
+
+    async def get_recent_downloads(self, limit: int = 10) -> list[dict]:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._recent_downloads_sync, limit)
+
+    def _recent_downloads_sync(self, limit: int) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute("""
+                SELECT d.title, d.platform, d.media_format, d.filesize,
+                       d.download_time_ms, d.created_at, u.username
+                FROM downloads d
+                LEFT JOIN users u ON u.user_id = d.user_id
+                WHERE d.success = 1
+                ORDER BY d.created_at DESC LIMIT ?
+            """, (limit,)).fetchall()
+            return [
+                {"title": r[0], "platform": r[1], "format": r[2],
+                 "filesize": r[3], "time_ms": r[4], "at": r[5],
+                 "username": r[6]}
+                for r in rows
+            ]
+
     async def get_daily_chart(self, days: int = 30) -> list[tuple[str, int]]:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self._daily_chart_sync, days)

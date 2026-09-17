@@ -246,72 +246,40 @@ class TelegramPlatform(BasePlatform):
                 await self._stats.track_action(message.from_user.id, "help")
             await message.answer(HELP_TEXT, parse_mode="HTML")
 
+        @self.dp.message(Command("admin"))
         @self.dp.message(Command("adminstats"))
-        async def cmd_adminstats(message: types.Message):
-            if not self._admin_id or message.from_user.id != self._admin_id:
+        async def cmd_admin(message: types.Message):
+            if not self._is_admin(message.from_user.id):
                 await message.answer("⛔ Только для администратора.")
                 return
-            if not self._stats:
-                await message.answer("Stats not available.")
-                return
-
-            gs = await self._stats.get_global_stats()
-            platforms = "\n".join(f"  ▸ {p}: <b>{c}</b>" for p, c in gs.top_platforms[:5]) or "  —"
-            formats = "\n".join(f"  ▸ {f}: <b>{c}</b>" for f, c in gs.top_formats) or "  —"
-            languages = "\n".join(f"  ▸ {l}: <b>{c}</b>" for l, c in gs.top_languages) or "  —"
-
-            total_gb = gs.total_bytes / (1024 ** 3)
-            avg_sec = gs.avg_download_time_ms / 1000 if gs.avg_download_time_ms else 0
-
-            text = (
-                "━━━━━━━━━━━━━━━━━━━━\n"
-                "    📊  <b>Admin Dashboard</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━\n\n"
-
-                f"👥 <b>Users: {gs.total_users}</b>\n"
-                f"  ▸ Active today: {gs.active_today}\n"
-                f"  ▸ Active this week: {gs.active_week}\n"
-                f"  ▸ New today: +{gs.new_users_today}\n"
-                f"  ▸ New this week: +{gs.new_users_week}\n"
-                f"  ▸ D1 retention: {gs.retention_d1:.0%}\n\n"
-
-                f"⬇️ <b>Downloads: {gs.total_downloads}</b>\n"
-                f"  ▸ Today: {gs.downloads_today}\n"
-                f"  ▸ Unique URLs today: {gs.unique_urls_today}\n"
-                f"  ▸ Traffic: {total_gb:.2f} GB\n"
-                f"  ▸ Avg size: {_format_size(gs.avg_filesize)}\n"
-                f"  ▸ Avg speed: {avg_sec:.1f}s\n"
-                f"  ▸ Error rate: {gs.error_rate:.1%}\n"
-                f"  ▸ Peak hour: {gs.peak_hour}:00 UTC\n\n"
-
-                f"📍 <b>Top platforms:</b>\n{platforms}\n\n"
-                f"🎬 <b>Top formats:</b>\n{formats}\n\n"
-                f"🌐 <b>Languages:</b>\n{languages}"
-            )
-            await message.answer(text, parse_mode="HTML")
+            await self._send_admin_main(message)
 
         @self.dp.message(Command("errors"))
         async def cmd_errors(message: types.Message):
-            if not self._admin_id or message.from_user.id != self._admin_id:
+            if not self._is_admin(message.from_user.id):
                 await message.answer("⛔ Только для администратора.")
                 return
-            if not self._stats:
-                return
-            errors = await self._stats.get_recent_errors(10)
-            if not errors:
-                await message.answer("✅ Ошибок нет.")
-                return
-            lines = []
-            for e in errors:
-                lines.append(f"▸ <b>{e['platform'] or '?'}</b>: {e['error'][:80]}")
+            await self._send_admin_errors(message)
 
-            text = (
-                "━━━━━━━━━━━━━━━━━━━━\n"
-                "    🔴  <b>Recent Errors</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━\n\n"
-                + "\n".join(lines)
-            )
-            await message.answer(text, parse_mode="HTML")
+        @self.dp.callback_query(F.data.startswith("adm:"))
+        async def handle_admin_nav(callback: types.CallbackQuery):
+            if not self._is_admin(callback.from_user.id):
+                await callback.answer("⛔ Admin only", show_alert=True)
+                return
+            await callback.answer()
+            section = callback.data.split(":")[1]
+            if section == "main":
+                await self._edit_admin_main(callback.message)
+            elif section == "users":
+                await self._edit_admin_users(callback.message)
+            elif section == "downloads":
+                await self._edit_admin_downloads(callback.message)
+            elif section == "errors":
+                await self._edit_admin_errors(callback.message)
+            elif section == "top":
+                await self._edit_admin_top(callback.message)
+            elif section == "recent":
+                await self._edit_admin_recent(callback.message)
 
         @self.dp.message(F.text)
         async def handle_message(message: types.Message):
@@ -469,6 +437,193 @@ class TelegramPlatform(BasePlatform):
                 download_range=(start_sec, end_sec),
                 user_id=callback.from_user.id, url_id=url_id,
             )
+
+    def _is_admin(self, user_id: int) -> bool:
+        return bool(self._admin_id and user_id == self._admin_id)
+
+    def _admin_nav(self, current: str = "") -> InlineKeyboardMarkup:
+        buttons = {
+            "main": "📊 Overview",
+            "users": "👥 Users",
+            "downloads": "⬇️ Downloads",
+            "top": "🏆 Top Users",
+            "recent": "🕐 Recent",
+            "errors": "🔴 Errors",
+        }
+        rows = []
+        row = []
+        for key, label in buttons.items():
+            if key == current:
+                continue
+            row.append(InlineKeyboardButton(text=label, callback_data=f"adm:{key}"))
+            if len(row) == 3:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def _send_admin_main(self, message: types.Message):
+        text = await self._build_admin_overview()
+        await message.answer(text, parse_mode="HTML", reply_markup=self._admin_nav("main"))
+
+    async def _edit_admin_main(self, message: types.Message):
+        text = await self._build_admin_overview()
+        await message.edit_text(text, parse_mode="HTML", reply_markup=self._admin_nav("main"))
+
+    async def _build_admin_overview(self) -> str:
+        if not self._stats:
+            return "Stats not available."
+        gs = await self._stats.get_global_stats()
+        total_gb = gs.total_bytes / (1024 ** 3)
+        avg_sec = gs.avg_download_time_ms / 1000 if gs.avg_download_time_ms else 0
+        return (
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "    📊  <b>Admin Panel</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"👥 <b>Users: {gs.total_users}</b>\n"
+            f"  ▸ Active today: {gs.active_today}\n"
+            f"  ▸ Active week: {gs.active_week}\n"
+            f"  ▸ New today: +{gs.new_users_today}\n"
+            f"  ▸ New week: +{gs.new_users_week}\n"
+            f"  ▸ D1 retention: {gs.retention_d1:.0%}\n\n"
+            f"⬇️ <b>Downloads: {gs.total_downloads}</b>\n"
+            f"  ▸ Today: {gs.downloads_today}\n"
+            f"  ▸ Unique URLs: {gs.unique_urls_today}\n"
+            f"  ▸ Traffic: {total_gb:.2f} GB\n"
+            f"  ▸ Avg size: {_format_size(gs.avg_filesize)}\n"
+            f"  ▸ Avg speed: {avg_sec:.1f}s\n"
+            f"  ▸ Error rate: {gs.error_rate:.1%}\n"
+            f"  ▸ Peak hour: {gs.peak_hour}:00 UTC\n\n"
+            f"🌐 <b>Languages:</b>\n"
+            + ("\n".join(f"  ▸ {l}: <b>{c}</b>" for l, c in gs.top_languages) or "  —")
+        )
+
+    async def _edit_admin_users(self, message: types.Message):
+        if not self._stats:
+            return
+        users = await self._stats.get_recent_users(10)
+        if not users:
+            await message.edit_text("Нет пользователей.", reply_markup=self._admin_nav("users"))
+            return
+
+        import datetime
+        lines = []
+        for u in users:
+            name = u["username"] or u["first_name"] or str(u["user_id"])
+            if u["username"]:
+                name = f"@{name}"
+            dt = datetime.datetime.fromtimestamp(u["first_seen"]).strftime("%d.%m %H:%M")
+            premium = " ⭐" if u["is_premium"] else ""
+            ref = f" ← {u['start_param']}" if u["start_param"] else ""
+            lines.append(f"▸ <b>{name}</b>{premium}  {u['language'] or '?'}  {dt}{ref}")
+
+        text = (
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "    👥  <b>Recent Users</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            + "\n".join(lines)
+        )
+        await message.edit_text(text, parse_mode="HTML", reply_markup=self._admin_nav("users"))
+
+    async def _edit_admin_downloads(self, message: types.Message):
+        if not self._stats:
+            return
+        gs = await self._stats.get_global_stats()
+        platforms = "\n".join(f"  ▸ {p}: <b>{c}</b>" for p, c in gs.top_platforms[:10]) or "  —"
+        formats = "\n".join(f"  ▸ {f}: <b>{c}</b>" for f, c in gs.top_formats) or "  —"
+
+        text = (
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "    ⬇️  <b>Downloads</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"<b>By platform:</b>\n{platforms}\n\n"
+            f"<b>By format:</b>\n{formats}"
+        )
+        await message.edit_text(text, parse_mode="HTML", reply_markup=self._admin_nav("downloads"))
+
+    async def _edit_admin_top(self, message: types.Message):
+        if not self._stats:
+            return
+        users = await self._stats.get_top_users(10)
+        if not users:
+            await message.edit_text("Нет данных.", reply_markup=self._admin_nav("top"))
+            return
+
+        lines = []
+        for i, u in enumerate(users, 1):
+            name = u["username"] or u["first_name"] or str(u["user_id"])
+            if u["username"]:
+                name = f"@{name}"
+            medal = ["🥇", "🥈", "🥉"][i - 1] if i <= 3 else f"{i}."
+            lines.append(
+                f"{medal} <b>{name}</b> — {u['downloads']} dl · {_format_size(u['total_bytes'])}"
+            )
+
+        text = (
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "    🏆  <b>Top Users</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            + "\n".join(lines)
+        )
+        await message.edit_text(text, parse_mode="HTML", reply_markup=self._admin_nav("top"))
+
+    async def _edit_admin_recent(self, message: types.Message):
+        if not self._stats:
+            return
+        downloads = await self._stats.get_recent_downloads(10)
+        if not downloads:
+            await message.edit_text("Нет скачиваний.", reply_markup=self._admin_nav("recent"))
+            return
+
+        import datetime
+        lines = []
+        for d in downloads:
+            title = (d["title"] or "?")[:30]
+            user = f"@{d['username']}" if d["username"] else "anon"
+            dt = datetime.datetime.fromtimestamp(d["at"]).strftime("%H:%M")
+            speed = f"{d['time_ms'] / 1000:.1f}s" if d["time_ms"] else "?"
+            lines.append(
+                f"▸ {dt}  <b>{title}</b>\n"
+                f"    {d['platform'] or '?'} · {d['format']} · {_format_size(d['filesize'])} · {speed} · {user}"
+            )
+
+        text = (
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "    🕐  <b>Recent Downloads</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            + "\n".join(lines)
+        )
+        await message.edit_text(text, parse_mode="HTML", reply_markup=self._admin_nav("recent"))
+
+    async def _send_admin_errors(self, message: types.Message):
+        text = await self._build_admin_errors()
+        await message.answer(text, parse_mode="HTML", reply_markup=self._admin_nav("errors"))
+
+    async def _edit_admin_errors(self, message: types.Message):
+        text = await self._build_admin_errors()
+        await message.edit_text(text, parse_mode="HTML", reply_markup=self._admin_nav("errors"))
+
+    async def _build_admin_errors(self) -> str:
+        if not self._stats:
+            return "Stats not available."
+        errors = await self._stats.get_recent_errors(10)
+        if not errors:
+            return (
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "    ✅  <b>No Errors</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "Всё работает штатно."
+            )
+        lines = []
+        for e in errors:
+            lines.append(f"▸ <b>{e['platform'] or '?'}</b>: {e['error'][:80]}")
+        return (
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "    🔴  <b>Recent Errors</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            + "\n".join(lines)
+        )
 
     async def _send_user_stats(self, message: types.Message):
         if self._stats:
