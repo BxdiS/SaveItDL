@@ -60,6 +60,7 @@ class Downloader:
         media_format: MediaFormat = MediaFormat.VIDEO,
         on_progress: Callable[[DownloadStatus, float], None] | None = None,
         format_id: str | None = None,
+        download_range: tuple[int, int] | None = None,
     ) -> DownloadResult:
         file_id = uuid.uuid4().hex[:12]
         output_template = str(Path(self._temp_dir) / f"{file_id}.%(ext)s")
@@ -96,6 +97,10 @@ class Downloader:
         else:
             opts["format"] = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
             opts["merge_output_format"] = "mp4"
+
+        if download_range:
+            start, end = download_range
+            opts["download_ranges"] = lambda info, ydl: [(start, end)]
 
         if on_progress:
             opts["progress_hooks"] = [

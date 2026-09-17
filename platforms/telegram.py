@@ -17,8 +17,12 @@ from platforms.base import BasePlatform
 logger = logging.getLogger(__name__)
 
 URL_REGEX = re.compile(r"https?://\S+")
+TWITCH_VOD_REGEX = re.compile(r"twitch\.tv/videos/(\d+)")
 TELEGRAM_FILE_LIMIT = 50 * 1024 * 1024
 MAX_PENDING = 5000
+VOD_DURATION_LIMIT = 30 * 60
+
+AUDIO_PLATFORMS = {"SoundCloud", "Bandcamp", "Mixcloud"}
 
 
 def _format_size(size_bytes: int | None) -> str:
@@ -32,57 +36,96 @@ def _format_size(size_bytes: int | None) -> str:
 def _format_duration(seconds: int | None) -> str:
     if not seconds:
         return ""
-    m, s = divmod(seconds, 60)
+    m, s = divmod(int(seconds), 60)
     h, m = divmod(m, 60)
     if h:
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m}:{s:02d}"
 
 
+def _parse_timestamp(ts: str) -> int | None:
+    ts = ts.strip()
+    parts = ts.split(":")
+    try:
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+        if len(parts) == 2:
+            return int(parts[0]) * 60 + int(parts[1])
+        if len(parts) == 1:
+            return int(parts[0]) * 60
+    except ValueError:
+        return None
+    return None
+
+
 def _short_id(url: str) -> str:
     return hashlib.sha256(url.encode()).hexdigest()[:10]
 
 
-def _build_format_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
-    video_buttons = []
-    audio_buttons = []
+def _is_audio_platform(info: MediaInfo) -> bool:
+    if info.platform in AUDIO_PLATFORMS:
+        return True
+    has_video = any(not f.is_audio_only for f in info.formats)
+    return not has_video
 
-    seen_video = set()
-    seen_audio = set()
 
-    for f in info.formats:
-        if f.is_audio_only:
-            label = f"{f.quality} • {f.ext} • {_format_size(f.filesize)}"
-            key = f"{f.quality}:{f.ext}"
-            if key in seen_audio:
-                continue
-            seen_audio.add(key)
-            audio_buttons.append(InlineKeyboardButton(
-                text=f"🎵 {label}",
-                callback_data=f"f:{url_id}:a:{f.format_id[:20]}",
-            ))
-        else:
-            label = f"{f.quality} • {f.ext} • {_format_size(f.filesize)}"
-            key = f"{f.quality}:{f.ext}"
-            if key in seen_video:
-                continue
-            seen_video.add(key)
-            video_buttons.append(InlineKeyboardButton(
-                text=f"🎬 {label}",
-                callback_data=f"f:{url_id}:v:{f.format_id[:20]}",
-            ))
+def _is_twitch_vod(url: str) -> bool:
+    return bool(TWITCH_VOD_REGEX.search(url))
 
+
+def _build_video_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
     rows = []
-    for btn in video_buttons[:8]:
-        rows.append([btn])
-    for btn in audio_buttons[:4]:
-        rows.append([btn])
+    for quality in ["1080", "720", "480"]:
+        for f in info.formats:
+            if f.is_audio_only:
+                continue
+            q = str(f.quality)
+            if quality in q or q == quality + "p":
+                label = f"🎬 {quality}p • {_format_size(f.filesize)}"
+                rows.append([InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"f:{url_id}:v:{f.format_id[:20]}",
+                )])
+                break
+
+    if not rows:
+        for f in info.formats:
+            if not f.is_audio_only:
+                label = f"🎬 {f.quality} • {_format_size(f.filesize)}"
+                rows.append([InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"f:{url_id}:v:{f.format_id[:20]}",
+                )])
+                if len(rows) >= 3:
+                    break
 
     rows.append([
-        InlineKeyboardButton(text="⬇️ Best Video (MP4)", callback_data=f"q:{url_id}:video"),
-        InlineKeyboardButton(text="🎵 Best Audio (MP3)", callback_data=f"q:{url_id}:audio"),
+        InlineKeyboardButton(text="⬇️ Best Video", callback_data=f"q:{url_id}:video"),
+        InlineKeyboardButton(text="🎵 MP3", callback_data=f"q:{url_id}:audio"),
     ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
+def _build_audio_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
+    rows = []
+    seen = set()
+    for f in info.formats:
+        q = str(f.quality)
+        if q in seen:
+            continue
+        seen.add(q)
+        label = f"🎵 {q} • {f.ext} • {_format_size(f.filesize)}"
+        rows.append([InlineKeyboardButton(
+            text=label,
+            callback_data=f"f:{url_id}:a:{f.format_id[:20]}",
+        )])
+        if len(rows) >= 4:
+            break
+
+    rows.append([InlineKeyboardButton(
+        text="🎵 Best Audio (MP3)",
+        callback_data=f"q:{url_id}:audio",
+    )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -95,13 +138,18 @@ class TelegramPlatform(BasePlatform):
         self.dp = Dispatcher()
         self._pool = pool
         self._pending_urls: OrderedDict[str, str] = OrderedDict()
+        self._pending_info: OrderedDict[str, MediaInfo] = OrderedDict()
+        self._awaiting_range: dict[int, str] = {}
         self._register_handlers()
 
-    def _store_url(self, url: str) -> str:
+    def _store_url(self, url: str, info: MediaInfo | None = None) -> str:
         uid = _short_id(url)
         self._pending_urls[uid] = url
+        if info:
+            self._pending_info[uid] = info
         while len(self._pending_urls) > MAX_PENDING:
-            self._pending_urls.popitem(last=False)
+            k, _ = self._pending_urls.popitem(last=False)
+            self._pending_info.pop(k, None)
         return uid
 
     def _get_url(self, uid: str) -> str | None:
@@ -111,14 +159,21 @@ class TelegramPlatform(BasePlatform):
         @self.dp.message(CommandStart())
         async def cmd_start(message: types.Message):
             await message.answer(
-                "🎬 Send me any link — I'll find all available formats.\n\n"
+                "🎬 Send me any link — I'll download it for you.\n\n"
                 "Supported: YouTube, TikTok, Instagram, Twitter/X, "
-                "SoundCloud, Reddit, VK, Rutube, Facebook and 1000+ more.\n\n"
+                "SoundCloud, Reddit, VK, Rutube, Twitch, Facebook "
+                "and 1000+ more.\n\n"
                 "Just paste a link."
             )
 
         @self.dp.message(F.text)
-        async def handle_url(message: types.Message):
+        async def handle_message(message: types.Message):
+            user_id = message.from_user.id
+
+            if user_id in self._awaiting_range:
+                await self._handle_vod_range(message)
+                return
+
             urls = URL_REGEX.findall(message.text or "")
             if not urls:
                 await message.answer("Send me a valid URL.")
@@ -131,28 +186,60 @@ class TelegramPlatform(BasePlatform):
                 info = await self.downloader.get_info(url)
             except Exception as e:
                 logger.warning("Info extraction failed for %s: %s", url, e)
-                await status_msg.edit_text(f"❌ Could not process this link: {e}")
+                await status_msg.edit_text(f"❌ Could not process this link.")
                 return
 
-            url_id = self._store_url(url)
+            url_id = self._store_url(url, info)
+            duration = info.duration or 0
+
+            if _is_twitch_vod(url) and duration > VOD_DURATION_LIMIT:
+                self._awaiting_range[user_id] = url_id
+                await status_msg.edit_text(
+                    f"**{info.title}**\n"
+                    f"⏱ {_format_duration(duration)} — this VOD is over 30 minutes.\n\n"
+                    "Send me the time range to download:\n"
+                    "`0:00 - 15:00` or `1:30:00 - 2:00:00`\n\n"
+                    "Or press the button to download a clip (first 30 min).",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                        InlineKeyboardButton(
+                            text="⬇️ First 30 min",
+                            callback_data=f"vod:{url_id}:0:1800",
+                        ),
+                        InlineKeyboardButton(
+                            text="❌ Cancel",
+                            callback_data=f"vod:{url_id}:cancel",
+                        ),
+                    ]]),
+                )
+                return
 
             header = f"**{info.title}**"
             if info.uploader:
                 header += f"\n👤 {info.uploader}"
-            if info.duration:
-                header += f"\n⏱ {_format_duration(info.duration)}"
+            if duration:
+                header += f"\n⏱ {_format_duration(duration)}"
             if info.platform:
                 header += f"\n📍 {info.platform}"
 
+            is_audio = _is_audio_platform(info)
+
             if info.formats:
                 header += "\n\nChoose quality:"
-                kb = _build_format_buttons(info, url_id)
+                if is_audio:
+                    kb = _build_audio_buttons(info, url_id)
+                else:
+                    kb = _build_video_buttons(info, url_id)
             else:
-                header += "\n\nNo specific formats found. Download best available:"
-                kb = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text="⬇️ Best Video", callback_data=f"q:{url_id}:video"),
-                    InlineKeyboardButton(text="🎵 Best Audio", callback_data=f"q:{url_id}:audio"),
-                ]])
+                if is_audio:
+                    kb = InlineKeyboardMarkup(inline_keyboard=[[
+                        InlineKeyboardButton(text="🎵 Best Audio (MP3)", callback_data=f"q:{url_id}:audio"),
+                    ]])
+                else:
+                    kb = InlineKeyboardMarkup(inline_keyboard=[[
+                        InlineKeyboardButton(text="⬇️ Best Video", callback_data=f"q:{url_id}:video"),
+                        InlineKeyboardButton(text="🎵 MP3", callback_data=f"q:{url_id}:audio"),
+                    ]])
 
             await status_msg.edit_text(header, reply_markup=kb, parse_mode="Markdown")
 
@@ -184,12 +271,80 @@ class TelegramPlatform(BasePlatform):
             media_format = MediaFormat.AUDIO if kind == "a" else MediaFormat.VIDEO
             await self._start_download(callback.message, url, media_format, format_id)
 
+        @self.dp.callback_query(F.data.startswith("vod:"))
+        async def handle_vod_callback(callback: types.CallbackQuery):
+            await callback.answer()
+            parts = callback.data.split(":")
+            if len(parts) < 3:
+                return
+            _, url_id = parts[0], parts[1]
+
+            user_id = callback.from_user.id
+            self._awaiting_range.pop(user_id, None)
+
+            if parts[2] == "cancel":
+                await callback.message.edit_text("❌ Cancelled.")
+                return
+
+            start_sec = int(parts[2])
+            end_sec = int(parts[3])
+            url = self._get_url(url_id)
+            if not url:
+                await callback.message.edit_text("⏳ Link expired. Send it again.")
+                return
+            await self._start_download(
+                callback.message, url, MediaFormat.VIDEO,
+                download_range=(start_sec, end_sec),
+            )
+
+    async def _handle_vod_range(self, message: types.Message):
+        user_id = message.from_user.id
+        url_id = self._awaiting_range.pop(user_id, None)
+        if not url_id:
+            return
+
+        url = self._get_url(url_id)
+        if not url:
+            await message.answer("⏳ Link expired. Send it again.")
+            return
+
+        text = (message.text or "").strip()
+        match = re.match(r"([\d:]+)\s*[-–—]\s*([\d:]+)", text)
+        if not match:
+            await message.answer(
+                "❌ Invalid format. Use `0:00 - 15:00` or `1:30:00 - 2:00:00`",
+                parse_mode="Markdown",
+            )
+            self._awaiting_range[user_id] = url_id
+            return
+
+        start = _parse_timestamp(match.group(1))
+        end = _parse_timestamp(match.group(2))
+        if start is None or end is None or end <= start:
+            await message.answer("❌ Invalid range. End must be after start.")
+            self._awaiting_range[user_id] = url_id
+            return
+
+        duration = end - start
+        if duration > VOD_DURATION_LIMIT:
+            await message.answer(
+                f"❌ Max range is 30 minutes. You requested {_format_duration(duration)}."
+            )
+            self._awaiting_range[user_id] = url_id
+            return
+
+        await self._start_download(
+            message, url, MediaFormat.VIDEO,
+            download_range=(start, end),
+        )
+
     async def _start_download(
         self,
         message: types.Message,
         url: str,
         media_format: MediaFormat,
         format_id: str | None = None,
+        download_range: tuple[int, int] | None = None,
     ):
         queue_pos = self._pool.queue_size
         active = self._pool.active_downloads
@@ -197,6 +352,10 @@ class TelegramPlatform(BasePlatform):
             status_text = f"⏳ Queue position {queue_pos + 1} ({active} active)..."
         else:
             status_text = "⬇️ Downloading..."
+
+        if download_range:
+            start, end = download_range
+            status_text += f"\n⏱ Range: {_format_duration(start)} — {_format_duration(end)}"
 
         status_msg = await message.answer(status_text)
 
@@ -248,6 +407,8 @@ class TelegramPlatform(BasePlatform):
         job = DownloadJob(url=url, media_format=media_format, callback=on_complete)
         if format_id:
             job.format_id = format_id
+        if download_range:
+            job.download_range = download_range
         accepted = await self._pool.submit(job)
         if not accepted:
             await status_msg.edit_text("❌ Queue full. Try again later.")
