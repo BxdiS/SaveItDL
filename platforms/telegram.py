@@ -197,11 +197,16 @@ class TelegramPlatform(BasePlatform):
         super().__init__(token, downloader)
         self._api_url = api_url
         if api_url:
-            self.bot = Bot(token=token, base_url=api_url)
+            base = api_url.rstrip("/")
+            if base.endswith("/bot"):
+                base = base[:-4]
+            logger.info("Using local Bot API: %s", base)
+            self.bot = Bot(token=token, base_url=base)
             self._file_limit = TELEGRAM_FILE_LIMIT_LOCAL
         else:
             self.bot = Bot(token=token)
             self._file_limit = TELEGRAM_FILE_LIMIT_DEFAULT
+        logger.info("Banner path: %s, exists: %s", BANNER_PATH, BANNER_PATH.exists())
         self.dp = Dispatcher()
         self._pool = pool
         self._stats = stats
@@ -235,6 +240,15 @@ class TelegramPlatform(BasePlatform):
         )
 
     def _register_handlers(self):
+        @self.dp.update.outer_middleware()
+        async def log_updates(handler, event, data):
+            logger.info(
+                "Update type=%s id=%s",
+                event.event_type,
+                event.update_id,
+            )
+            return await handler(event, data)
+
         @self.dp.message(CommandStart())
         async def cmd_start(message: types.Message):
             start_param = None
