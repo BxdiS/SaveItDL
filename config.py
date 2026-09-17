@@ -18,6 +18,7 @@ class Config:
     max_workers: int = 4
     queue_size: int = 100
     admin_id: int | None = None
+    stats_db: str = "stats.db"
 
     @classmethod
     def from_env(cls) -> Config:
@@ -30,4 +31,5 @@ class Config:
             max_workers=int(os.getenv("MAX_WORKERS", "4")),
             queue_size=int(os.getenv("QUEUE_SIZE", "100")),
             admin_id=int(os.getenv("ADMIN_ID", "0")) or None,
+            stats_db=os.getenv("STATS_DB", "stats.db"),
         )

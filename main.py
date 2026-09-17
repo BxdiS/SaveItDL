@@ -6,6 +6,7 @@ import sys
 from config import Config
 from core.downloader import Downloader
 from core.notifier import AdminNotifier, AlertLevel
+from core.stats import StatsDB
 from core.worker_pool import WorkerPool
 from platforms.telegram import TelegramPlatform
 
@@ -80,6 +81,7 @@ async def monitor_health(pool: WorkerPool, notifier: AdminNotifier, temp_dir: st
 async def main():
     cfg = Config.from_env()
     notifier = AdminNotifier(admin_id=cfg.admin_id)
+    stats = StatsDB(db_path=cfg.stats_db)
     downloader = Downloader(temp_dir=cfg.temp_dir)
     pool = WorkerPool(
         downloader=downloader,
@@ -92,15 +94,15 @@ async def main():
         "discord": cfg.discord_token,
     }
 
-    def make_tg_factory(dl, p, n):
+    def make_tg_factory(dl, p, n, s, aid):
         def factory(token):
-            platform = TelegramPlatform(token, dl, p)
+            platform = TelegramPlatform(token, dl, p, stats=s, admin_id=aid)
             n.set_bot(platform.bot)
             return platform
         return factory
 
     platform_factories = {
-        "telegram": make_tg_factory(downloader, pool, notifier),
+        "telegram": make_tg_factory(downloader, pool, notifier, stats, cfg.admin_id),
     }
 
     tasks = []
