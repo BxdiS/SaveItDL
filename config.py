@@ -19,6 +19,7 @@ class Config:
     queue_size: int = 100
     admin_id: int | None = None
     stats_db: str = "stats.db"
+    bot_api_url: str | None = None
 
     @classmethod
     def from_env(cls) -> Config:
@@ -32,4 +33,5 @@ class Config:
             queue_size=int(os.getenv("QUEUE_SIZE", "100")),
             admin_id=int(os.getenv("ADMIN_ID", "0")) or None,
             stats_db=os.getenv("STATS_DB", "stats.db"),
+            bot_api_url=os.getenv("BOT_API_URL") or None,
         )

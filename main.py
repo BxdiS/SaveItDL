@@ -96,15 +96,15 @@ async def main():
         "discord": cfg.discord_token,
     }
 
-    def make_tg_factory(dl, p, n, s, aid):
+    def make_tg_factory(dl, p, n, s, aid, api_url):
         def factory(token):
-            platform = TelegramPlatform(token, dl, p, stats=s, admin_id=aid)
+            platform = TelegramPlatform(token, dl, p, stats=s, admin_id=aid, api_url=api_url)
             n.set_bot(platform.bot)
             return platform
         return factory
 
     platform_factories = {
-        "telegram": make_tg_factory(downloader, pool, notifier, stats, cfg.admin_id),
+        "telegram": make_tg_factory(downloader, pool, notifier, stats, cfg.admin_id, cfg.bot_api_url),
     }
 
     tasks = []

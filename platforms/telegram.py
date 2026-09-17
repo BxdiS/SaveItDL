@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 
 URL_REGEX = re.compile(r"https?://\S+")
 TWITCH_VOD_REGEX = re.compile(r"twitch\.tv/videos/(\d+)")
-TELEGRAM_FILE_LIMIT = 50 * 1024 * 1024
+TELEGRAM_FILE_LIMIT_DEFAULT = 50 * 1024 * 1024
+TELEGRAM_FILE_LIMIT_LOCAL = 2000 * 1024 * 1024
 MAX_PENDING = 5000
 VOD_DURATION_LIMIT = 30 * 60
 
@@ -187,9 +188,16 @@ class TelegramPlatform(BasePlatform):
     name = "telegram"
 
     def __init__(self, token: str, downloader: Downloader, pool: WorkerPool,
-                 stats: StatsDB | None = None, admin_id: int | None = None):
+                 stats: StatsDB | None = None, admin_id: int | None = None,
+                 api_url: str | None = None):
         super().__init__(token, downloader)
-        self.bot = Bot(token=token)
+        self._api_url = api_url
+        if api_url:
+            self.bot = Bot(token=token, base_url=api_url)
+            self._file_limit = TELEGRAM_FILE_LIMIT_LOCAL
+        else:
+            self.bot = Bot(token=token)
+            self._file_limit = TELEGRAM_FILE_LIMIT_DEFAULT
         self.dp = Dispatcher()
         self._pool = pool
         self._stats = stats
@@ -768,35 +776,13 @@ class TelegramPlatform(BasePlatform):
                 return
 
             filesize = result.filesize or 0
-            if filesize > TELEGRAM_FILE_LIMIT:
+            if filesize > self._file_limit:
+                await status_msg.edit_text(
+                    f"❌ Файл слишком большой ({_format_size(filesize)}). "
+                    f"Лимит — {_format_size(self._file_limit)}."
+                )
                 self.downloader.cleanup(result)
-                if media_format == MediaFormat.VIDEO and not format_id:
-                    await status_msg.edit_text(
-                        f"⚠️ Файл {_format_size(filesize)} — слишком большой.\n"
-                        f"⬇️ <i>Пробую в пониженном качестве...</i>",
-                        parse_mode="HTML",
-                    )
-                    retry_result = await self.downloader.download(
-                        url, media_format,
-                        format_id="bestvideo[filesize<50M]+bestaudio/best[filesize<50M]/worst",
-                        download_range=download_range,
-                    )
-                    if retry_result.success and retry_result.filesize and retry_result.filesize <= TELEGRAM_FILE_LIMIT:
-                        result = retry_result
-                    else:
-                        if retry_result.file_path:
-                            self.downloader.cleanup(retry_result)
-                        await status_msg.edit_text(
-                            f"❌ Файл слишком большой даже в мин. качестве.\n"
-                            f"Лимит Telegram — 50 МБ."
-                        )
-                        return
-                else:
-                    await status_msg.edit_text(
-                        f"❌ Файл слишком большой ({_format_size(filesize)}). "
-                        f"Лимит Telegram — 50 МБ."
-                    )
-                    return
+                return
 
             await status_msg.edit_text("📤 <i>Загружаю в Telegram...</i>", parse_mode="HTML")
 
