@@ -21,7 +21,7 @@
 - [x] Extended analytics: sessions, premium tracking, start params, user actions, D1 retention, language stats, new users, avg download speed
 
 ### Supported out of the box
-YouTube, TikTok, Instagram + Reels, X.com, SoundCloud, Facebook, VK Video, Rutube, Twitch (clips + VODs)
+YouTube, TikTok, Instagram + Reels, X.com, SoundCloud, Facebook, VK Video, Rutube, Twitch (clips + VODs), Pornhub, xHamster, xGroovy, FapHouse, YouPorn, Eporner
 
 ### Require extra work
 - Spotify (spotdl), Yandex Music (cookies), Bluesky (custom), Kinopoisk (DRM — impossible)
