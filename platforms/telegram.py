@@ -7,7 +7,13 @@ from collections import OrderedDict
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command, CommandStart
-from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 
 from core.downloader import Downloader
 from core.models import DownloadResult, MediaFormat, MediaInfo
@@ -24,6 +30,14 @@ MAX_PENDING = 5000
 VOD_DURATION_LIMIT = 30 * 60
 
 AUDIO_PLATFORMS = {"SoundCloud", "Bandcamp", "Mixcloud"}
+
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="📊 My Stats"), KeyboardButton(text="❓ Help")],
+    ],
+    resize_keyboard=True,
+    is_persistent=True,
+)
 
 
 def _format_size(size_bytes: int | None) -> str:
@@ -82,7 +96,7 @@ def _build_video_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
                 continue
             q = str(f.quality)
             if quality in q or q == quality + "p":
-                label = f"🎬 {quality}p • {_format_size(f.filesize)}"
+                label = f"🎬 {quality}p  ·  {_format_size(f.filesize)}"
                 rows.append([InlineKeyboardButton(
                     text=label,
                     callback_data=f"f:{url_id}:v:{f.format_id[:20]}",
@@ -92,7 +106,7 @@ def _build_video_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
     if not rows:
         for f in info.formats:
             if not f.is_audio_only:
-                label = f"🎬 {f.quality} • {_format_size(f.filesize)}"
+                label = f"🎬 {f.quality}  ·  {_format_size(f.filesize)}"
                 rows.append([InlineKeyboardButton(
                     text=label,
                     callback_data=f"f:{url_id}:v:{f.format_id[:20]}",
@@ -115,7 +129,7 @@ def _build_audio_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
         if q in seen:
             continue
         seen.add(q)
-        label = f"🎵 {q} • {f.ext} • {_format_size(f.filesize)}"
+        label = f"🎵 {q}  ·  {f.ext}  ·  {_format_size(f.filesize)}"
         rows.append([InlineKeyboardButton(
             text=label,
             callback_data=f"f:{url_id}:a:{f.format_id[:20]}",
@@ -128,6 +142,38 @@ def _build_audio_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
         callback_data=f"q:{url_id}:audio",
     )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+WELCOME_TEXT = (
+    "━━━━━━━━━━━━━━━━━━━━\n"
+    "    🎬  <b>SaveItDL</b>\n"
+    "━━━━━━━━━━━━━━━━━━━━\n\n"
+    "Скачивай медиа с любых платформ —\n"
+    "просто отправь ссылку.\n\n"
+    "▸ YouTube, TikTok, Instagram\n"
+    "▸ Twitter/X, Reddit, Facebook\n"
+    "▸ SoundCloud, VK, Rutube\n"
+    "▸ Twitch и 1000+ других\n\n"
+    "📎 <i>Вставь ссылку — и я сделаю всё сам.</i>"
+)
+
+HELP_TEXT = (
+    "━━━━━━━━━━━━━━━━━━━━\n"
+    "    ❓  <b>Помощь</b>\n"
+    "━━━━━━━━━━━━━━━━━━━━\n\n"
+    "<b>Как пользоваться:</b>\n"
+    "1️⃣ Отправь мне ссылку на видео или аудио\n"
+    "2️⃣ Я определю контент и покажу качества\n"
+    "3️⃣ Выбери — и файл придёт в чат\n\n"
+    "<b>Команды:</b>\n"
+    "/start — Главное меню\n"
+    "/stats — Твоя статистика\n\n"
+    "<b>Поддержка:</b>\n"
+    "▸ Видео: 1080p / 720p / 480p\n"
+    "▸ Аудио: MP3 / лучшее качество\n"
+    "▸ Twitch VOD: скачивание фрагмента\n\n"
+    "📎 <i>Лимит файла: 50 МБ (ограничение Telegram)</i>"
+)
 
 
 class TelegramPlatform(BasePlatform):
@@ -159,90 +205,118 @@ class TelegramPlatform(BasePlatform):
     def _get_url(self, uid: str) -> str | None:
         return self._pending_urls.get(uid)
 
+    async def _track_user(self, user: types.User, start_param: str | None = None):
+        if not self._stats:
+            return
+        await self._stats.track_user(
+            user.id, user.username, user.first_name,
+            user.language_code, last_name=user.last_name,
+            is_premium=bool(user.is_premium),
+            start_param=start_param,
+        )
+
     def _register_handlers(self):
         @self.dp.message(CommandStart())
         async def cmd_start(message: types.Message):
+            start_param = None
+            if message.text and " " in message.text:
+                start_param = message.text.split(" ", 1)[1]
+
+            await self._track_user(message.from_user, start_param=start_param)
+            if self._stats:
+                await self._stats.track_action(message.from_user.id, "start", start_param)
+
             await message.answer(
-                "🎬 Send me any link — I'll download it for you.\n\n"
-                "Supported: YouTube, TikTok, Instagram, Twitter/X, "
-                "SoundCloud, Reddit, VK, Rutube, Twitch, Facebook "
-                "and 1000+ more.\n\n"
-                "Just paste a link."
+                WELCOME_TEXT,
+                parse_mode="HTML",
+                reply_markup=MAIN_KEYBOARD,
             )
 
         @self.dp.message(Command("stats"))
         async def cmd_stats(message: types.Message):
-            if not self._stats:
-                await message.answer("Stats not available.")
-                return
-            user_id = message.from_user.id
-            us = await self._stats.get_user_stats(user_id)
-            if not us:
-                await message.answer("You haven't downloaded anything yet.")
-                return
-            text = (
-                f"📊 **Your stats**\n\n"
-                f"Downloads: **{us.total_downloads}**\n"
-                f"Total size: **{_format_size(us.total_bytes)}**\n"
-                f"Favorite source: **{us.favorite_platform or '—'}**\n"
-                f"Favorite format: **{us.favorite_format or '—'}**"
-            )
-            await message.answer(text, parse_mode="Markdown")
+            await self._send_user_stats(message)
+
+        @self.dp.message(F.text == "📊 My Stats")
+        async def btn_stats(message: types.Message):
+            await self._send_user_stats(message)
+
+        @self.dp.message(F.text == "❓ Help")
+        async def btn_help(message: types.Message):
+            if self._stats:
+                await self._stats.track_action(message.from_user.id, "help")
+            await message.answer(HELP_TEXT, parse_mode="HTML")
 
         @self.dp.message(Command("adminstats"))
         async def cmd_adminstats(message: types.Message):
             if not self._admin_id or message.from_user.id != self._admin_id:
-                await message.answer("Admin only.")
+                await message.answer("⛔ Только для администратора.")
                 return
             if not self._stats:
                 await message.answer("Stats not available.")
                 return
 
             gs = await self._stats.get_global_stats()
-            platforms = "\n".join(f"  {p}: {c}" for p, c in gs.top_platforms[:5]) or "  —"
-            formats = "\n".join(f"  {f}: {c}" for f, c in gs.top_formats) or "  —"
+            platforms = "\n".join(f"  ▸ {p}: <b>{c}</b>" for p, c in gs.top_platforms[:5]) or "  —"
+            formats = "\n".join(f"  ▸ {f}: <b>{c}</b>" for f, c in gs.top_formats) or "  —"
+            languages = "\n".join(f"  ▸ {l}: <b>{c}</b>" for l, c in gs.top_languages) or "  —"
 
             total_gb = gs.total_bytes / (1024 ** 3)
+            avg_sec = gs.avg_download_time_ms / 1000 if gs.avg_download_time_ms else 0
+
             text = (
-                f"📊 **Admin Dashboard**\n\n"
-                f"👥 Users: **{gs.total_users}**\n"
-                f"  Active today: {gs.active_today}\n"
-                f"  Active this week: {gs.active_week}\n\n"
-                f"⬇️ Downloads: **{gs.total_downloads}**\n"
-                f"  Today: {gs.downloads_today}\n"
-                f"  Total traffic: {total_gb:.2f} GB\n"
-                f"  Avg file size: {_format_size(gs.avg_filesize)}\n"
-                f"  Error rate: {gs.error_rate:.1%}\n"
-                f"  Peak hour: {gs.peak_hour}:00 UTC\n\n"
-                f"📍 Top platforms:\n{platforms}\n\n"
-                f"🎬 Top formats:\n{formats}"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "    📊  <b>Admin Dashboard</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+                f"👥 <b>Users: {gs.total_users}</b>\n"
+                f"  ▸ Active today: {gs.active_today}\n"
+                f"  ▸ Active this week: {gs.active_week}\n"
+                f"  ▸ New today: +{gs.new_users_today}\n"
+                f"  ▸ New this week: +{gs.new_users_week}\n"
+                f"  ▸ D1 retention: {gs.retention_d1:.0%}\n\n"
+
+                f"⬇️ <b>Downloads: {gs.total_downloads}</b>\n"
+                f"  ▸ Today: {gs.downloads_today}\n"
+                f"  ▸ Unique URLs today: {gs.unique_urls_today}\n"
+                f"  ▸ Traffic: {total_gb:.2f} GB\n"
+                f"  ▸ Avg size: {_format_size(gs.avg_filesize)}\n"
+                f"  ▸ Avg speed: {avg_sec:.1f}s\n"
+                f"  ▸ Error rate: {gs.error_rate:.1%}\n"
+                f"  ▸ Peak hour: {gs.peak_hour}:00 UTC\n\n"
+
+                f"📍 <b>Top platforms:</b>\n{platforms}\n\n"
+                f"🎬 <b>Top formats:</b>\n{formats}\n\n"
+                f"🌐 <b>Languages:</b>\n{languages}"
             )
-            await message.answer(text, parse_mode="Markdown")
+            await message.answer(text, parse_mode="HTML")
 
         @self.dp.message(Command("errors"))
         async def cmd_errors(message: types.Message):
             if not self._admin_id or message.from_user.id != self._admin_id:
-                await message.answer("Admin only.")
+                await message.answer("⛔ Только для администратора.")
                 return
             if not self._stats:
                 return
             errors = await self._stats.get_recent_errors(10)
             if not errors:
-                await message.answer("No recent errors.")
+                await message.answer("✅ Ошибок нет.")
                 return
             lines = []
             for e in errors:
-                lines.append(f"• {e['platform'] or '?'}: {e['error'][:80]}")
-            await message.answer("🔴 **Recent errors:**\n\n" + "\n".join(lines), parse_mode="Markdown")
+                lines.append(f"▸ <b>{e['platform'] or '?'}</b>: {e['error'][:80]}")
+
+            text = (
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "    🔴  <b>Recent Errors</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                + "\n".join(lines)
+            )
+            await message.answer(text, parse_mode="HTML")
 
         @self.dp.message(F.text)
         async def handle_message(message: types.Message):
             user_id = message.from_user.id
-            if self._stats:
-                u = message.from_user
-                await self._stats.track_user(
-                    user_id, u.username, u.first_name, u.language_code,
-                )
+            await self._track_user(message.from_user)
 
             if user_id in self._awaiting_range:
                 await self._handle_vod_range(message)
@@ -250,17 +324,23 @@ class TelegramPlatform(BasePlatform):
 
             urls = URL_REGEX.findall(message.text or "")
             if not urls:
-                await message.answer("Send me a valid URL.")
+                await message.answer(
+                    "📎 <i>Отправь мне ссылку на видео или аудио.</i>",
+                    parse_mode="HTML",
+                )
                 return
             url = urls[0]
 
-            status_msg = await message.answer("🔍 Analyzing link...")
+            if self._stats:
+                await self._stats.track_action(user_id, "url_sent", url[:200])
+
+            status_msg = await message.answer("🔍 <i>Анализирую ссылку...</i>", parse_mode="HTML")
 
             try:
                 info = await self.downloader.get_info(url)
             except Exception as e:
                 logger.warning("Info extraction failed for %s: %s", url, e)
-                await status_msg.edit_text(f"❌ Could not process this link.")
+                await status_msg.edit_text("❌ Не удалось обработать ссылку.")
                 return
 
             url_id = self._store_url(url, info)
@@ -269,37 +349,45 @@ class TelegramPlatform(BasePlatform):
             if _is_twitch_vod(url) and duration > VOD_DURATION_LIMIT:
                 self._awaiting_range[user_id] = url_id
                 await status_msg.edit_text(
-                    f"**{info.title}**\n"
-                    f"⏱ {_format_duration(duration)} — this VOD is over 30 minutes.\n\n"
-                    "Send me the time range to download:\n"
-                    "`0:00 - 15:00` or `1:30:00 - 2:00:00`\n\n"
-                    "Or press the button to download a clip (first 30 min).",
-                    parse_mode="Markdown",
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📺 <b>{info.title}</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"⏱ <b>{_format_duration(duration)}</b> — VOD дольше 30 минут.\n\n"
+                    f"Отправь промежуток для скачивания:\n"
+                    f"<code>0:00 - 15:00</code>  или  <code>1:30:00 - 2:00:00</code>\n\n"
+                    f"Или нажми кнопку ниже:",
+                    parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                         InlineKeyboardButton(
-                            text="⬇️ First 30 min",
+                            text="⬇️ Первые 30 мин",
                             callback_data=f"vod:{url_id}:0:1800",
                         ),
                         InlineKeyboardButton(
-                            text="❌ Cancel",
+                            text="❌ Отмена",
                             callback_data=f"vod:{url_id}:cancel",
                         ),
                     ]]),
                 )
                 return
 
-            header = f"**{info.title}**"
-            if info.uploader:
-                header += f"\n👤 {info.uploader}"
-            if duration:
-                header += f"\n⏱ {_format_duration(duration)}"
-            if info.platform:
-                header += f"\n📍 {info.platform}"
-
+            header = f"━━━━━━━━━━━━━━━━━━━━\n"
             is_audio = _is_audio_platform(info)
+            icon = "🎵" if is_audio else "🎬"
+            header += f"{icon} <b>{info.title}</b>\n"
+            header += "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+            details = []
+            if info.uploader:
+                details.append(f"👤 {info.uploader}")
+            if duration:
+                details.append(f"⏱ {_format_duration(duration)}")
+            if info.platform:
+                details.append(f"📍 {info.platform}")
+            if details:
+                header += "\n".join(details) + "\n"
 
             if info.formats:
-                header += "\n\nChoose quality:"
+                header += "\n<b>Выбери качество:</b>"
                 if is_audio:
                     kb = _build_audio_buttons(info, url_id)
                 else:
@@ -315,7 +403,7 @@ class TelegramPlatform(BasePlatform):
                         InlineKeyboardButton(text="🎵 MP3", callback_data=f"q:{url_id}:audio"),
                     ]])
 
-            await status_msg.edit_text(header, reply_markup=kb, parse_mode="Markdown")
+            await status_msg.edit_text(header, reply_markup=kb, parse_mode="HTML")
 
         @self.dp.callback_query(F.data.startswith("q:"))
         async def handle_quick_download(callback: types.CallbackQuery):
@@ -326,9 +414,11 @@ class TelegramPlatform(BasePlatform):
             _, url_id, fmt = parts
             url = self._get_url(url_id)
             if not url:
-                await callback.message.edit_text("⏳ Link expired. Send it again.")
+                await callback.message.edit_text("⏳ Ссылка устарела. Отправь заново.")
                 return
             media_format = MediaFormat.AUDIO if fmt == "audio" else MediaFormat.VIDEO
+            if self._stats:
+                await self._stats.track_action(callback.from_user.id, "quality_pick", fmt)
             await self._start_download(
                 callback.message, url, media_format,
                 user_id=callback.from_user.id, url_id=url_id,
@@ -343,9 +433,11 @@ class TelegramPlatform(BasePlatform):
             _, url_id, kind, format_id = parts
             url = self._get_url(url_id)
             if not url:
-                await callback.message.edit_text("⏳ Link expired. Send it again.")
+                await callback.message.edit_text("⏳ Ссылка устарела. Отправь заново.")
                 return
             media_format = MediaFormat.AUDIO if kind == "a" else MediaFormat.VIDEO
+            if self._stats:
+                await self._stats.track_action(callback.from_user.id, "format_pick", f"{kind}:{format_id}")
             await self._start_download(
                 callback.message, url, media_format, format_id,
                 user_id=callback.from_user.id, url_id=url_id,
@@ -363,20 +455,50 @@ class TelegramPlatform(BasePlatform):
             self._awaiting_range.pop(user_id, None)
 
             if parts[2] == "cancel":
-                await callback.message.edit_text("❌ Cancelled.")
+                await callback.message.edit_text("❌ Отменено.")
                 return
 
             start_sec = int(parts[2])
             end_sec = int(parts[3])
             url = self._get_url(url_id)
             if not url:
-                await callback.message.edit_text("⏳ Link expired. Send it again.")
+                await callback.message.edit_text("⏳ Ссылка устарела. Отправь заново.")
                 return
             await self._start_download(
                 callback.message, url, MediaFormat.VIDEO,
                 download_range=(start_sec, end_sec),
                 user_id=callback.from_user.id, url_id=url_id,
             )
+
+    async def _send_user_stats(self, message: types.Message):
+        if self._stats:
+            await self._stats.track_action(message.from_user.id, "stats_view")
+
+        if not self._stats:
+            await message.answer("Статистика недоступна.")
+            return
+        user_id = message.from_user.id
+        us = await self._stats.get_user_stats(user_id)
+        if not us:
+            await message.answer(
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "    📊  <b>Твоя статистика</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "<i>Пока нет скачиваний. Отправь ссылку!</i>",
+                parse_mode="HTML",
+            )
+            return
+
+        text = (
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "    📊  <b>Твоя статистика</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"⬇️ Скачиваний: <b>{us.total_downloads}</b>\n"
+            f"💾 Объём: <b>{_format_size(us.total_bytes)}</b>\n"
+            f"📍 Любимый источник: <b>{us.favorite_platform or '—'}</b>\n"
+            f"🎬 Любимый формат: <b>{us.favorite_format or '—'}</b>"
+        )
+        await message.answer(text, parse_mode="HTML")
 
     async def _handle_vod_range(self, message: types.Message):
         user_id = message.from_user.id
@@ -386,15 +508,15 @@ class TelegramPlatform(BasePlatform):
 
         url = self._get_url(url_id)
         if not url:
-            await message.answer("⏳ Link expired. Send it again.")
+            await message.answer("⏳ Ссылка устарела. Отправь заново.")
             return
 
         text = (message.text or "").strip()
         match = re.match(r"([\d:]+)\s*[-–—]\s*([\d:]+)", text)
         if not match:
             await message.answer(
-                "❌ Invalid format. Use `0:00 - 15:00` or `1:30:00 - 2:00:00`",
-                parse_mode="Markdown",
+                "❌ Неверный формат. Используй <code>0:00 - 15:00</code> или <code>1:30:00 - 2:00:00</code>",
+                parse_mode="HTML",
             )
             self._awaiting_range[user_id] = url_id
             return
@@ -402,14 +524,14 @@ class TelegramPlatform(BasePlatform):
         start = _parse_timestamp(match.group(1))
         end = _parse_timestamp(match.group(2))
         if start is None or end is None or end <= start:
-            await message.answer("❌ Invalid range. End must be after start.")
+            await message.answer("❌ Неверный диапазон. Конец должен быть после начала.")
             self._awaiting_range[user_id] = url_id
             return
 
         duration = end - start
         if duration > VOD_DURATION_LIMIT:
             await message.answer(
-                f"❌ Max range is 30 minutes. You requested {_format_duration(duration)}."
+                f"❌ Максимум 30 минут. Ты запросил {_format_duration(duration)}."
             )
             self._awaiting_range[user_id] = url_id
             return
@@ -434,15 +556,15 @@ class TelegramPlatform(BasePlatform):
         queue_pos = self._pool.queue_size
         active = self._pool.active_downloads
         if queue_pos > 0 or active >= self._pool._max_workers:
-            status_text = f"⏳ Queue position {queue_pos + 1} ({active} active)..."
+            status_text = f"⏳ Позиция в очереди: {queue_pos + 1} ({active} активных)..."
         else:
-            status_text = "⬇️ Downloading..."
+            status_text = "⬇️ <i>Скачиваю...</i>"
 
         if download_range:
             start, end = download_range
-            status_text += f"\n⏱ Range: {_format_duration(start)} — {_format_duration(end)}"
+            status_text += f"\n⏱ Диапазон: {_format_duration(start)} — {_format_duration(end)}"
 
-        status_msg = await message.answer(status_text)
+        status_msg = await message.answer(status_text, parse_mode="HTML")
 
         import time as _time
         dl_start_time = _time.time()
@@ -469,21 +591,24 @@ class TelegramPlatform(BasePlatform):
             filesize = result.filesize or 0
             if filesize > TELEGRAM_FILE_LIMIT:
                 await status_msg.edit_text(
-                    f"❌ File too large ({_format_size(filesize)}). "
-                    f"Telegram limit is 50 MB."
+                    f"❌ Файл слишком большой ({_format_size(filesize)}). "
+                    f"Лимит Telegram — 50 МБ."
                 )
                 self.downloader.cleanup(result)
                 return
 
-            await status_msg.edit_text("📤 Uploading...")
+            await status_msg.edit_text("📤 <i>Загружаю в Telegram...</i>", parse_mode="HTML")
 
             caption_parts = []
             if result.title:
-                caption_parts.append(result.title)
+                caption_parts.append(f"<b>{result.title}</b>")
+            meta = []
             if result.duration:
-                caption_parts.append(_format_duration(result.duration))
-            caption_parts.append(_format_size(result.filesize))
-            caption = " | ".join(caption_parts)
+                meta.append(_format_duration(result.duration))
+            meta.append(_format_size(result.filesize))
+            if meta:
+                caption_parts.append(" · ".join(meta))
+            caption = "\n".join(caption_parts)
 
             try:
                 input_file = FSInputFile(result.file_path)
@@ -491,18 +616,20 @@ class TelegramPlatform(BasePlatform):
                     await message.answer_audio(
                         audio=input_file,
                         caption=caption,
+                        parse_mode="HTML",
                         title=result.title,
                     )
                 else:
                     await message.answer_video(
                         video=input_file,
                         caption=caption,
+                        parse_mode="HTML",
                         supports_streaming=True,
                     )
                 await status_msg.delete()
             except Exception as e:
                 logger.exception("Upload failed")
-                await status_msg.edit_text(f"❌ Upload failed: {e}")
+                await status_msg.edit_text(f"❌ Ошибка загрузки: {e}")
             finally:
                 self.downloader.cleanup(result)
 
@@ -513,7 +640,7 @@ class TelegramPlatform(BasePlatform):
             job.download_range = download_range
         accepted = await self._pool.submit(job)
         if not accepted:
-            await status_msg.edit_text("❌ Queue full. Try again later.")
+            await status_msg.edit_text("❌ Очередь заполнена. Попробуй позже.")
 
     async def start(self) -> None:
         logger.info("Starting Telegram bot...")

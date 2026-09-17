@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -31,6 +31,12 @@ class GlobalStats:
     avg_filesize: int
     peak_hour: int | None
     error_rate: float
+    new_users_today: int = 0
+    new_users_week: int = 0
+    avg_download_time_ms: int = 0
+    top_languages: list[tuple[str, int]] = field(default_factory=list)
+    retention_d1: float = 0.0
+    unique_urls_today: int = 0
 
 
 class StatsDB:
@@ -52,9 +58,13 @@ class StatsDB:
                     user_id INTEGER PRIMARY KEY,
                     username TEXT,
                     first_name TEXT,
+                    last_name TEXT,
                     language_code TEXT,
+                    is_premium INTEGER DEFAULT 0,
+                    start_param TEXT,
                     first_seen REAL NOT NULL,
-                    last_active REAL NOT NULL
+                    last_active REAL NOT NULL,
+                    total_sessions INTEGER DEFAULT 1
                 );
 
                 CREATE TABLE IF NOT EXISTS downloads (
@@ -74,32 +84,97 @@ class StatsDB:
                     FOREIGN KEY (user_id) REFERENCES users(user_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS user_actions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    action TEXT NOT NULL,
+                    detail TEXT,
+                    created_at REAL NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_downloads_user ON downloads(user_id);
                 CREATE INDEX IF NOT EXISTS idx_downloads_created ON downloads(created_at);
                 CREATE INDEX IF NOT EXISTS idx_downloads_platform ON downloads(platform);
+                CREATE INDEX IF NOT EXISTS idx_actions_user ON user_actions(user_id);
+                CREATE INDEX IF NOT EXISTS idx_actions_created ON user_actions(created_at);
             """)
+            self._migrate(conn)
+
+    def _migrate(self, conn: sqlite3.Connection):
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+        for col, typ in [
+            ("last_name", "TEXT"),
+            ("is_premium", "INTEGER DEFAULT 0"),
+            ("start_param", "TEXT"),
+            ("total_sessions", "INTEGER DEFAULT 1"),
+        ]:
+            if col not in cols:
+                conn.execute(f"ALTER TABLE users ADD COLUMN {col} {typ}")
 
     async def track_user(
         self, user_id: int, username: str | None = None,
         first_name: str | None = None, language_code: str | None = None,
+        last_name: str | None = None, is_premium: bool = False,
+        start_param: str | None = None,
     ):
         now = time.time()
         async with self._lock:
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, self._track_user_sync,
-                                       user_id, username, first_name, language_code, now)
+            await loop.run_in_executor(
+                None, self._track_user_sync,
+                user_id, username, first_name, last_name,
+                language_code, is_premium, start_param, now,
+            )
 
-    def _track_user_sync(self, user_id, username, first_name, language_code, now):
+    def _track_user_sync(self, user_id, username, first_name, last_name,
+                          language_code, is_premium, start_param, now):
         with self._conn() as conn:
-            conn.execute("""
-                INSERT INTO users (user_id, username, first_name, language_code, first_seen, last_active)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    username = COALESCE(excluded.username, username),
-                    first_name = COALESCE(excluded.first_name, first_name),
-                    language_code = COALESCE(excluded.language_code, language_code),
-                    last_active = excluded.last_active
-            """, (user_id, username, first_name, language_code, now, now))
+            existing = conn.execute(
+                "SELECT first_seen, last_active FROM users WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+
+            session_inc = 0
+            if existing:
+                last_active = existing[1]
+                if now - last_active > 1800:
+                    session_inc = 1
+
+            if existing:
+                conn.execute("""
+                    UPDATE users SET
+                        username = COALESCE(?, username),
+                        first_name = COALESCE(?, first_name),
+                        last_name = COALESCE(?, last_name),
+                        language_code = COALESCE(?, language_code),
+                        is_premium = ?,
+                        start_param = COALESCE(start_param, ?),
+                        last_active = ?,
+                        total_sessions = total_sessions + ?
+                    WHERE user_id = ?
+                """, (username, first_name, last_name, language_code,
+                      int(is_premium), start_param, now, session_inc, user_id))
+            else:
+                conn.execute("""
+                    INSERT INTO users
+                    (user_id, username, first_name, last_name, language_code,
+                     is_premium, start_param, first_seen, last_active, total_sessions)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """, (user_id, username, first_name, last_name, language_code,
+                      int(is_premium), start_param, now, now))
+
+    async def track_action(self, user_id: int, action: str, detail: str | None = None):
+        now = time.time()
+        async with self._lock:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self._track_action_sync, user_id, action, detail, now)
+
+    def _track_action_sync(self, user_id, action, detail, now):
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO user_actions (user_id, action, detail, created_at) VALUES (?, ?, ?, ?)",
+                (user_id, action, detail, now),
+            )
 
     async def track_download(
         self, user_id: int, url: str, platform: str | None,
@@ -145,6 +220,14 @@ class StatsDB:
             active_week = conn.execute(
                 "SELECT COUNT(*) FROM users WHERE last_active > ?", (week_ago,)
             ).fetchone()[0]
+
+            new_users_today = conn.execute(
+                "SELECT COUNT(*) FROM users WHERE first_seen > ?", (day_ago,)
+            ).fetchone()[0]
+            new_users_week = conn.execute(
+                "SELECT COUNT(*) FROM users WHERE first_seen > ?", (week_ago,)
+            ).fetchone()[0]
+
             total_downloads = conn.execute(
                 "SELECT COUNT(*) FROM downloads WHERE success = 1"
             ).fetchone()[0]
@@ -153,6 +236,11 @@ class StatsDB:
             ).fetchone()[0]
             downloads_today = conn.execute(
                 "SELECT COUNT(*) FROM downloads WHERE created_at > ? AND success = 1",
+                (day_ago,)
+            ).fetchone()[0]
+
+            unique_urls_today = conn.execute(
+                "SELECT COUNT(DISTINCT url) FROM downloads WHERE created_at > ? AND success = 1",
                 (day_ago,)
             ).fetchone()[0]
 
@@ -173,6 +261,11 @@ class StatsDB:
             ).fetchone()
             avg_filesize = int(avg_row[0]) if avg_row[0] else 0
 
+            avg_dl_row = conn.execute(
+                "SELECT AVG(download_time_ms) FROM downloads WHERE success = 1 AND download_time_ms > 0"
+            ).fetchone()
+            avg_download_time_ms = int(avg_dl_row[0]) if avg_dl_row[0] else 0
+
             peak_row = conn.execute("""
                 SELECT CAST(strftime('%H', created_at, 'unixepoch') AS INTEGER) as hr,
                        COUNT(*) as cnt
@@ -187,6 +280,25 @@ class StatsDB:
             ).fetchone()[0]
             error_rate = failed / total_attempts if total_attempts > 0 else 0.0
 
+            top_languages = conn.execute("""
+                SELECT language_code, COUNT(*) as cnt FROM users
+                WHERE language_code IS NOT NULL
+                GROUP BY language_code ORDER BY cnt DESC LIMIT 5
+            """).fetchall()
+
+            two_days_ago = now - 172800
+            cohort = conn.execute(
+                "SELECT COUNT(*) FROM users WHERE first_seen BETWEEN ? AND ?",
+                (two_days_ago, day_ago),
+            ).fetchone()[0]
+            returned = conn.execute("""
+                SELECT COUNT(DISTINCT u.user_id) FROM users u
+                JOIN downloads d ON d.user_id = u.user_id
+                WHERE u.first_seen BETWEEN ? AND ?
+                AND d.created_at > ?
+            """, (two_days_ago, day_ago, day_ago)).fetchone()[0]
+            retention_d1 = returned / cohort if cohort > 0 else 0.0
+
         return GlobalStats(
             total_users=total_users,
             active_today=active_today,
@@ -199,6 +311,12 @@ class StatsDB:
             avg_filesize=avg_filesize,
             peak_hour=peak_hour,
             error_rate=error_rate,
+            new_users_today=new_users_today,
+            new_users_week=new_users_week,
+            avg_download_time_ms=avg_download_time_ms,
+            top_languages=top_languages,
+            retention_d1=retention_d1,
+            unique_urls_today=unique_urls_today,
         )
 
     async def get_user_stats(self, user_id: int) -> UserStats | None:

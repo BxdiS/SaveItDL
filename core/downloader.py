@@ -9,6 +9,7 @@ from typing import Callable
 
 import yt_dlp
 
+from core.metadata import embed_audio_metadata, extract_metadata_from_info
 from core.models import DownloadResult, DownloadStatus, FormatOption, MediaFormat, MediaInfo
 
 logger = logging.getLogger(__name__)
@@ -117,6 +118,10 @@ class Downloader:
             result_path = self._find_output(file_id)
             if not result_path:
                 return DownloadResult(success=False, error="Downloaded file not found")
+
+            if media_format == MediaFormat.AUDIO:
+                meta = extract_metadata_from_info(data)
+                embed_audio_metadata(result_path, url=url, **meta)
 
             if on_progress:
                 on_progress(DownloadStatus.DONE, 100.0)

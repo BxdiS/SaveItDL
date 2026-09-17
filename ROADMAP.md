@@ -15,6 +15,10 @@
 - [x] /stats — personal stats
 - [x] /adminstats — full admin dashboard
 - [x] /errors — recent download errors
+- [x] Audio metadata embedding (ID3 tags: artist, album, date, genre via mutagen)
+- [x] ReplyKeyboardMarkup — persistent bottom buttons (📊 My Stats, ❓ Help)
+- [x] Beautiful UI: HTML formatting, banners, structured messages, Russian locale
+- [x] Extended analytics: sessions, premium tracking, start params, user actions, D1 retention, language stats, new users, avg download speed
 
 ### Supported out of the box
 YouTube, TikTok, Instagram + Reels, X.com, SoundCloud, Facebook, VK Video, Rutube, Twitch (clips + VODs)
@@ -43,18 +47,17 @@ YouTube, TikTok, Instagram + Reels, X.com, SoundCloud, Facebook, VK Video, Rutub
 - [ ] Short videos (<60s) → video note (circle)
 - [ ] Thumbnail in format selection
 - [ ] /help with full guide
-- [ ] Russian error messages (detect language_code)
 - [ ] Retry button on failures
 - [ ] "via @SaveItDLbot" caption (viral, free tier only)
 - [ ] Share button after download
 
 ## v1.4 — Deploy & ops
-- [ ] Cloud-init script (Ubuntu + Python + ffmpeg + systemd)
-- [ ] systemd unit with watchdog
-- [ ] Logrotate
-- [ ] Auto yt-dlp update (weekly cron)
-- [ ] Auto temp cleanup (hourly, files >1h old)
-- [ ] stats.db backup (daily)
+- [x] Cloud-init script (Ubuntu + Python + ffmpeg + systemd)
+- [x] systemd unit with watchdog
+- [x] Logrotate
+- [x] Auto yt-dlp update (weekly cron)
+- [x] Auto temp cleanup (hourly, files >1h old)
+- [x] stats.db backup (daily)
 
 ## v1.5 — Monetization
 - [ ] Telegram Stars payments
@@ -91,16 +94,17 @@ YouTube, TikTok, Instagram + Reels, X.com, SoundCloud, Facebook, VK Video, Rutub
 - [ ] Audio trimming (user sends range)
 - [ ] Video compression to fit 50MB limit
 - [ ] Subtitle extraction (.srt/.vtt)
-- [ ] Audio metadata editor (title/artist/album tags)
 - [ ] Schedule downloads (off-peak)
 
-## v2.2 — Analytics
+## v2.2 — Analytics v2
 - [ ] Weekly admin digest (automated Telegram report)
-- [ ] Retention metrics: D1, D7, D30
+- [ ] Retention metrics: D7, D30
 - [ ] Cohort analysis
-- [ ] Geographic distribution
+- [ ] Geographic distribution (via language_code mapping)
 - [ ] Download speed benchmarks per platform
 - [ ] Cost per download tracking
+- [ ] Funnel: URL sent → quality picked → download completed
+- [ ] User segmentation (power users, one-time, returning)
 
 ## v2.3 — Security & compliance
 - [ ] DMCA: block specific URLs/domains
