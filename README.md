@@ -1,4 +1,8 @@
-# SaveItDL
+# SaveItDL — Video & Audio Downloader Bot for Telegram
+
+[![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://python.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/BxdiS/SaveItDL)](https://github.com/BxdiS/SaveItDL/stargazers)
 
 Video and audio downloader — self-hosted or via Telegram bot.
 
@@ -91,6 +95,29 @@ Set `ADMIN_ID` in `.env` to your Telegram user ID. Then use `/admin` in the bot 
 - Recent downloads and errors
 - Top users
 - System overview
+
+---
+
+## RU — Описание на русском
+
+Бот для скачивания видео и аудио из YouTube, TikTok, Instagram, Twitter, SoundCloud и других сайтов.
+
+**Не хочешь ничего устанавливать?** Открой [@SaveItDLbot](https://t.me/SaveItDLbot) в Telegram — отправь ссылку, получи файл. Бесплатно.
+
+**Хочешь свой сервер?** Клонируй репо, настрой `.env`, запусти. Без ограничений.
+
+### Возможности
+
+- Скачать видео (MP4) или аудио (MP3) по ссылке
+- Выбор качества из доступных форматов
+- Без водяных знаков (TikTok и другие)
+- ID3-теги для аудио (исполнитель, альбом, дата)
+- Без рекламы, без трекинга
+- Open source
+
+### Поддерживаемые сайты
+
+YouTube, TikTok, Instagram, Reels, Twitter/X, Reddit, Facebook, SoundCloud, VK, Rutube, Twitch и [все остальные через yt-dlp](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md).
 
 ## License
 
