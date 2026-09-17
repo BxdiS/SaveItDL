@@ -123,12 +123,12 @@ Telegram Premium подписчики, взаимодействующие с б�
 
 ### Неделя 1: Базовое присутствие (2-3 часа)
 
-- [ ] **BotFather полная настройка**
-  - Display name с ключевыми словами (текст выше)
-  - About, Description, Short Description
-  - Аватарка (фиолетово-синий градиент, стрелка вниз)
-  - Включить inline mode
-  - /setcommands: start, help, formats
+- [x] **BotFather полная настройка** ✅
+  - ~~Display name с ключевыми словами~~
+  - ~~About, Description~~
+  - ~~Аватарка~~
+  - ~~Включить inline mode~~
+  - ~~/setcommands~~
 
 - [ ] **Каталоги ботов** (даёт 50-300 юзеров/мес)
   - findmini.app
