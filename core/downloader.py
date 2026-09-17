@@ -49,7 +49,19 @@ class Downloader:
             if not f.get("url"):
                 continue
             is_audio = f.get("vcodec") in (None, "none")
-            quality = f.get("format_note") or f.get("height") or f.get("abr") or "?"
+            if is_audio:
+                quality = f.get("abr") or f.get("format_note") or "?"
+                if isinstance(quality, (int, float)):
+                    quality = f"{int(quality)}kbps"
+            else:
+                height = f.get("height")
+                note = f.get("format_note")
+                if height:
+                    quality = f"{height}p"
+                elif note:
+                    quality = note
+                else:
+                    quality = "?"
             formats.append(FormatOption(
                 format_id=f["format_id"],
                 ext=f.get("ext", "mp4"),

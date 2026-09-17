@@ -89,36 +89,43 @@ def _is_twitch_vod(url: str) -> bool:
 
 
 def _build_video_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
-    rows = []
-    for quality in ["1080", "720", "480"]:
-        for i, f in enumerate(info.formats):
-            if f.is_audio_only:
-                continue
-            q = str(f.quality)
-            if quality in q or q == quality + "p":
-                label = f"🎬 {quality}p  ·  {_format_size(f.filesize)}"
-                rows.append([InlineKeyboardButton(
-                    text=label,
-                    callback_data=f"f:{url_id}:v:{i}",
-                )])
-                break
+    video_formats = []
+    seen_quality = set()
+    for i, f in enumerate(info.formats):
+        if f.is_audio_only:
+            continue
+        q = str(f.quality)
+        if q in seen_quality:
+            continue
+        seen_quality.add(q)
+        video_formats.append((i, f))
 
-    if not rows:
-        for i, f in enumerate(info.formats):
-            if not f.is_audio_only:
-                label = f"🎬 {f.quality}  ·  {_format_size(f.filesize)}"
-                rows.append([InlineKeyboardButton(
-                    text=label,
-                    callback_data=f"f:{url_id}:v:{i}",
-                )])
-                if len(rows) >= 3:
-                    break
+    video_formats.sort(key=lambda x: _quality_sort_key(x[1].quality), reverse=True)
+
+    rows = []
+    for i, f in video_formats[:5]:
+        q = str(f.quality)
+        if q.isdigit():
+            q = f"{q}p"
+        label = f"🎬 {q}  ·  {f.ext}  ·  {_format_size(f.filesize)}"
+        rows.append([InlineKeyboardButton(
+            text=label,
+            callback_data=f"f:{url_id}:v:{i}",
+        )])
 
     rows.append([
         InlineKeyboardButton(text="⬇️ Best Video", callback_data=f"q:{url_id}:video"),
         InlineKeyboardButton(text="🎵 MP3", callback_data=f"q:{url_id}:audio"),
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _quality_sort_key(quality: str) -> int:
+    q = str(quality).rstrip("pk").split("x")[-1]
+    try:
+        return int(q)
+    except ValueError:
+        return 0
 
 
 def _build_audio_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
@@ -134,7 +141,7 @@ def _build_audio_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
             text=label,
             callback_data=f"f:{url_id}:a:{i}",
         )])
-        if len(rows) >= 4:
+        if len(rows) >= 5:
             break
 
     rows.append([InlineKeyboardButton(
