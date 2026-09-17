@@ -247,8 +247,14 @@ class TelegramPlatform(BasePlatform):
             await message.answer(HELP_TEXT, parse_mode="HTML")
 
         @self.dp.message(Command("admin"))
-        @self.dp.message(Command("adminstats"))
         async def cmd_admin(message: types.Message):
+            if not self._is_admin(message.from_user.id):
+                await message.answer("⛔ Только для администратора.")
+                return
+            await self._send_admin_main(message)
+
+        @self.dp.message(Command("adminstats"))
+        async def cmd_adminstats(message: types.Message):
             if not self._is_admin(message.from_user.id):
                 await message.answer("⛔ Только для администратора.")
                 return
