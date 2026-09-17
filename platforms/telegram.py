@@ -91,7 +91,7 @@ def _is_twitch_vod(url: str) -> bool:
 def _build_video_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
     rows = []
     for quality in ["1080", "720", "480"]:
-        for f in info.formats:
+        for i, f in enumerate(info.formats):
             if f.is_audio_only:
                 continue
             q = str(f.quality)
@@ -99,17 +99,17 @@ def _build_video_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
                 label = f"🎬 {quality}p  ·  {_format_size(f.filesize)}"
                 rows.append([InlineKeyboardButton(
                     text=label,
-                    callback_data=f"f:{url_id}:v:{f.format_id[:20]}",
+                    callback_data=f"f:{url_id}:v:{i}",
                 )])
                 break
 
     if not rows:
-        for f in info.formats:
+        for i, f in enumerate(info.formats):
             if not f.is_audio_only:
                 label = f"🎬 {f.quality}  ·  {_format_size(f.filesize)}"
                 rows.append([InlineKeyboardButton(
                     text=label,
-                    callback_data=f"f:{url_id}:v:{f.format_id[:20]}",
+                    callback_data=f"f:{url_id}:v:{i}",
                 )])
                 if len(rows) >= 3:
                     break
@@ -124,7 +124,7 @@ def _build_video_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
 def _build_audio_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
     rows = []
     seen = set()
-    for f in info.formats:
+    for i, f in enumerate(info.formats):
         q = str(f.quality)
         if q in seen:
             continue
@@ -132,7 +132,7 @@ def _build_audio_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
         label = f"🎵 {q}  ·  {f.ext}  ·  {_format_size(f.filesize)}"
         rows.append([InlineKeyboardButton(
             text=label,
-            callback_data=f"f:{url_id}:a:{f.format_id[:20]}",
+            callback_data=f"f:{url_id}:a:{i}",
         )])
         if len(rows) >= 4:
             break
@@ -404,11 +404,22 @@ class TelegramPlatform(BasePlatform):
             parts = callback.data.split(":")
             if len(parts) < 4:
                 return
-            _, url_id, kind, format_id = parts
+            _, url_id, kind, fmt_idx = parts
             url = self._get_url(url_id)
             if not url:
                 await callback.message.edit_text("⏳ Ссылка устарела. Отправь заново.")
                 return
+
+            format_id = None
+            info = self._pending_info.get(url_id)
+            if info:
+                try:
+                    idx = int(fmt_idx)
+                    if 0 <= idx < len(info.formats):
+                        format_id = info.formats[idx].format_id
+                except (ValueError, IndexError):
+                    pass
+
             media_format = MediaFormat.AUDIO if kind == "a" else MediaFormat.VIDEO
             if self._stats:
                 await self._stats.track_action(callback.from_user.id, "format_pick", f"{kind}:{format_id}")

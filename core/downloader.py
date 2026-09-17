@@ -89,14 +89,15 @@ class Downloader:
         }
 
         if format_id:
-            opts["format"] = format_id
             if media_format == MediaFormat.AUDIO:
+                opts["format"] = format_id
                 opts["postprocessors"] = [{
                     "key": "FFmpegExtractAudio",
                     "preferredcodec": "mp3",
                     "preferredquality": "192",
                 }]
             else:
+                opts["format"] = f"{format_id}+bestaudio/{format_id}/best"
                 opts["merge_output_format"] = "mp4"
         elif media_format == MediaFormat.AUDIO:
             opts.update({
