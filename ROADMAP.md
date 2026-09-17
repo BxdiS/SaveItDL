@@ -28,12 +28,18 @@ YouTube, TikTok, Instagram + Reels, X.com, SoundCloud, Facebook, VK Video, Rutub
 
 ---
 
-## v1.1 — User limits & anti-abuse
-- [ ] Per-user daily download limit (10/day free)
-- [ ] Premium tiers: unlimited via Stars payment
+## v1.1 — Smart queue & traffic control
+- [ ] Per-file size limit (configurable, default 200MB for free users)
+- [ ] Per-user daily download limit (10/day free, ~500MB/day)
+- [ ] Monthly traffic budget tracking (3TB cap → admin alert at 80%)
+- [ ] Download timeout: kill stuck jobs after 5 min, free the slot
+- [ ] Fair queue: round-robin per user, one active download per user max
+- [ ] Pre-download size check: reject if estimated filesize > limit
+- [ ] Auto quality cap: if traffic budget low, cap at 720p
+- [ ] Premium tiers: unlimited size, no caption, priority queue, 4K
 - [ ] Rate limiting: 1 req / 5 sec per user
 - [ ] Cooldown message with remaining time
-- [ ] Admin: /setlimit, /ban, /unban
+- [ ] Admin: /setlimit, /ban, /unban, /traffic (current month usage)
 
 ## v1.2 — Extra sources
 - [ ] Spotify (spotdl integration)
