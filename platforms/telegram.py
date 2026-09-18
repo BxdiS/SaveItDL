@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import logging
-import os
 import re
 from collections import OrderedDict
 from pathlib import Path
@@ -10,11 +10,10 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
+    BotCommand,
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
 )
 
 from core.downloader import Downloader
@@ -33,15 +32,6 @@ MAX_PENDING = 5000
 VOD_DURATION_LIMIT = 30 * 60
 
 AUDIO_PLATFORMS = {"SoundCloud", "Bandcamp", "Mixcloud"}
-
-MAIN_KEYBOARD = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="📊 My Stats"), KeyboardButton(text="❓ Help")],
-    ],
-    resize_keyboard=True,
-    is_persistent=True,
-)
-
 
 def _format_size(size_bytes: int | None) -> str:
     if not size_bytes:
@@ -117,7 +107,7 @@ def _build_video_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
         )])
 
     rows.append([
-        InlineKeyboardButton(text="⬇️ Best Video", callback_data=f"q:{url_id}:video"),
+        InlineKeyboardButton(text="🎬 Лучшее видео", callback_data=f"q:{url_id}:video"),
         InlineKeyboardButton(text="🎵 MP3", callback_data=f"q:{url_id}:audio"),
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -148,44 +138,45 @@ def _build_audio_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
             break
 
     rows.append([InlineKeyboardButton(
-        text="🎵 Best Audio (MP3)",
+        text="🎵 Лучшее качество (MP3)",
         callback_data=f"q:{url_id}:audio",
     )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 BANNER_PATH = Path(__file__).resolve().parent.parent / "assets" / "banner.jpg"
+CHANNEL_URL = "https://t.me/SaveItDL"
 
 WELCOME_TEXT = (
-    "🎬 <b>SaveItDL</b>\n\n"
-    "Скачивай видео и аудио с любых платформ.\n"
-    "Просто отправь ссылку."
+    "🎬 <b>Welcome to the SaveItDL</b>\n\n"
+    "Скачивай видео и аудио с ЛЮБЫХ платформ.\n"
+    "Просто отправь ссылку..."
 )
 
 WELCOME_KEYBOARD = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="📎  Отправить ссылку", callback_data="menu:hint")],
-    [InlineKeyboardButton(text="📊  Моя статистика", callback_data="menu:stats")],
-    [InlineKeyboardButton(text="❓  Как пользоваться", callback_data="menu:help")],
-    [InlineKeyboardButton(text="📢  Канал обновлений", url="https://t.me/SaveItDLnews")],
+    [InlineKeyboardButton(text="🚀 Как пользоваться?", callback_data="menu:howto")],
+    [
+        InlineKeyboardButton(text="📊 Статистика", callback_data="menu:stats"),
+        InlineKeyboardButton(text="💬 Помощь", url=CHANNEL_URL),
+    ],
 ])
 
-HELP_TEXT = (
-    "━━━━━━━━━━━━━━━━━━━━\n"
-    "    ❓  <b>Помощь</b>\n"
-    "━━━━━━━━━━━━━━━━━━━━\n\n"
-    "<b>Как пользоваться:</b>\n"
-    "1️⃣ Отправь мне ссылку на видео или аудио\n"
-    "2️⃣ Я определю контент и покажу качества\n"
-    "3️⃣ Выбери — и файл придёт в чат\n\n"
-    "<b>Команды:</b>\n"
-    "/start — Главное меню\n"
-    "/stats — Твоя статистика\n\n"
-    "<b>Поддержка:</b>\n"
-    "▸ Видео: 1080p / 720p / 480p\n"
-    "▸ Аудио: MP3 / лучшее качество\n"
-    "▸ Twitch VOD: скачивание фрагмента\n\n"
-    "📎 <i>Лимит файла: 50 МБ (ограничение Telegram)</i>"
+BACK_KEYBOARD = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:main")],
+])
+
+HOWTO_TEXT = (
+    "🚀 <b>Как пользоваться</b>\n\n"
+    "1. Пришли ссылку на видео или аудио.\n"
+    "2. Выбери качество кнопкой.\n"
+    "3. Получи файл в чат.\n\n"
+    "<b>Форматы</b>\n"
+    "▸ Видео — 1080p / 720p / 480p\n"
+    "▸ Аудио — MP3, лучшее качество\n"
+    "▸ Twitch VOD — фрагмент до 30 минут"
 )
+
+HELP_TEXT = HOWTO_TEXT  # backwards-compat for /help command
 
 
 class TelegramPlatform(BasePlatform):
@@ -242,7 +233,7 @@ class TelegramPlatform(BasePlatform):
     def _register_handlers(self):
         @self.dp.update.outer_middleware()
         async def log_updates(handler, event, data):
-            logger.info(
+            logger.debug(
                 "Update type=%s id=%s",
                 event.event_type,
                 event.update_id,
@@ -260,7 +251,7 @@ class TelegramPlatform(BasePlatform):
                 await self._stats.track_action(message.from_user.id, "start", start_param)
 
             banner = BANNER_PATH
-            logger.info("Banner path: %s, exists: %s", banner, banner.exists())
+            sent_banner = False
             if banner.exists():
                 try:
                     await message.answer_photo(
@@ -269,34 +260,22 @@ class TelegramPlatform(BasePlatform):
                         parse_mode="HTML",
                         reply_markup=WELCOME_KEYBOARD,
                     )
-                except Exception as e:
+                    sent_banner = True
+                except Exception:
                     logger.exception("Failed to send banner")
-                    await message.answer(
-                        WELCOME_TEXT,
-                        parse_mode="HTML",
-                        reply_markup=WELCOME_KEYBOARD,
-                    )
-            else:
+            if not sent_banner:
                 await message.answer(
                     WELCOME_TEXT,
                     parse_mode="HTML",
                     reply_markup=WELCOME_KEYBOARD,
                 )
-            await message.answer(
-                "⬇️ Вставь ссылку:",
-                reply_markup=MAIN_KEYBOARD,
-            )
 
         @self.dp.message(Command("stats"))
         async def cmd_stats(message: types.Message):
-            await self._send_user_stats(message)
+            await self._send_user_stats(message.from_user.id, message)
 
-        @self.dp.message(F.text == "📊 My Stats")
-        async def btn_stats(message: types.Message):
-            await self._send_user_stats(message)
-
-        @self.dp.message(F.text == "❓ Help")
-        async def btn_help(message: types.Message):
+        @self.dp.message(Command("help"))
+        async def cmd_help(message: types.Message):
             if self._stats:
                 await self._stats.track_action(message.from_user.id, "help")
             await message.answer(HELP_TEXT, parse_mode="HTML")
@@ -325,14 +304,14 @@ class TelegramPlatform(BasePlatform):
         @self.dp.callback_query(F.data.startswith("menu:"))
         async def handle_menu(callback: types.CallbackQuery):
             action = callback.data.split(":")[1]
-            if action == "hint":
-                await callback.answer("Просто отправь ссылку в чат!", show_alert=True)
+            await callback.answer()
+            if action == "main":
+                await self._edit_menu(callback.message, WELCOME_TEXT, WELCOME_KEYBOARD)
+            elif action == "howto":
+                await self._edit_menu(callback.message, HOWTO_TEXT, BACK_KEYBOARD)
             elif action == "stats":
-                await callback.answer()
-                await self._send_user_stats(callback.message)
-            elif action == "help":
-                await callback.answer()
-                await callback.message.answer(HELP_TEXT, parse_mode="HTML")
+                text = await self._build_user_stats_text(callback.from_user.id)
+                await self._edit_menu(callback.message, text, BACK_KEYBOARD)
 
         @self.dp.callback_query(F.data.startswith("adm:"))
         async def handle_admin_nav(callback: types.CallbackQuery):
@@ -387,16 +366,15 @@ class TelegramPlatform(BasePlatform):
             url_id = self._store_url(url, info)
             duration = info.duration or 0
 
+            safe_title = html.escape(info.title or "Без названия")
+
             if _is_twitch_vod(url) and duration > VOD_DURATION_LIMIT:
                 self._awaiting_range[user_id] = url_id
                 await status_msg.edit_text(
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"📺 <b>{info.title}</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"⏱ <b>{_format_duration(duration)}</b> — VOD дольше 30 минут.\n\n"
-                    f"Отправь промежуток для скачивания:\n"
-                    f"<code>0:00 - 15:00</code>  или  <code>1:30:00 - 2:00:00</code>\n\n"
-                    f"Или нажми кнопку ниже:",
+                    f"📺 <b>{safe_title}</b>\n"
+                    f"⏱ {_format_duration(duration)} — VOD дольше 30 минут.\n\n"
+                    f"Пришли диапазон для скачивания:\n"
+                    f"<code>0:00 - 15:00</code>  или  <code>1:30:00 - 2:00:00</code>",
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                         InlineKeyboardButton(
@@ -411,24 +389,22 @@ class TelegramPlatform(BasePlatform):
                 )
                 return
 
-            header = f"━━━━━━━━━━━━━━━━━━━━\n"
             is_audio = _is_audio_platform(info)
             icon = "🎵" if is_audio else "🎬"
-            header += f"{icon} <b>{info.title}</b>\n"
-            header += "━━━━━━━━━━━━━━━━━━━━\n\n"
+            lines = [f"{icon} <b>{safe_title}</b>"]
 
             details = []
             if info.uploader:
-                details.append(f"👤 {info.uploader}")
+                details.append(f"👤 {html.escape(info.uploader)}")
             if duration:
                 details.append(f"⏱ {_format_duration(duration)}")
             if info.platform:
-                details.append(f"📍 {info.platform}")
+                details.append(f"📍 {html.escape(info.platform)}")
             if details:
-                header += "\n".join(details) + "\n"
+                lines.append(" · ".join(details))
 
             if info.formats:
-                header += "\n<b>Выбери качество:</b>"
+                lines.append("\n<b>Выбери качество:</b>")
                 if is_audio:
                     kb = _build_audio_buttons(info, url_id)
                 else:
@@ -436,15 +412,15 @@ class TelegramPlatform(BasePlatform):
             else:
                 if is_audio:
                     kb = InlineKeyboardMarkup(inline_keyboard=[[
-                        InlineKeyboardButton(text="🎵 Best Audio (MP3)", callback_data=f"q:{url_id}:audio"),
+                        InlineKeyboardButton(text="🎵 MP3", callback_data=f"q:{url_id}:audio"),
                     ]])
                 else:
                     kb = InlineKeyboardMarkup(inline_keyboard=[[
-                        InlineKeyboardButton(text="⬇️ Best Video", callback_data=f"q:{url_id}:video"),
+                        InlineKeyboardButton(text="🎬 Видео", callback_data=f"q:{url_id}:video"),
                         InlineKeyboardButton(text="🎵 MP3", callback_data=f"q:{url_id}:audio"),
                     ]])
 
-            await status_msg.edit_text(header, reply_markup=kb, parse_mode="HTML")
+            await status_msg.edit_text("\n".join(lines), reply_markup=kb, parse_mode="HTML")
 
         @self.dp.callback_query(F.data.startswith("q:"))
         async def handle_quick_download(callback: types.CallbackQuery):
@@ -561,10 +537,11 @@ class TelegramPlatform(BasePlatform):
         gs = await self._stats.get_global_stats()
         total_gb = gs.total_bytes / (1024 ** 3)
         avg_sec = gs.avg_download_time_ms / 1000 if gs.avg_download_time_ms else 0
+        langs = "\n".join(
+            f"  ▸ {html.escape(l)}: <b>{c}</b>" for l, c in gs.top_languages
+        ) or "  —"
         return (
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "    📊  <b>Admin Panel</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "📊 <b>Admin</b>\n\n"
             f"👥 <b>Users: {gs.total_users}</b>\n"
             f"  ▸ Active today: {gs.active_today}\n"
             f"  ▸ Active week: {gs.active_week}\n"
@@ -579,8 +556,7 @@ class TelegramPlatform(BasePlatform):
             f"  ▸ Avg speed: {avg_sec:.1f}s\n"
             f"  ▸ Error rate: {gs.error_rate:.1%}\n"
             f"  ▸ Peak hour: {gs.peak_hour}:00 UTC\n\n"
-            f"🌐 <b>Languages:</b>\n"
-            + ("\n".join(f"  ▸ {l}: <b>{c}</b>" for l, c in gs.top_languages) or "  —")
+            f"🌐 <b>Languages</b>\n{langs}"
         )
 
     async def _edit_admin_users(self, message: types.Message):
@@ -594,35 +570,34 @@ class TelegramPlatform(BasePlatform):
         import datetime
         lines = []
         for u in users:
-            name = u["username"] or u["first_name"] or str(u["user_id"])
+            raw_name = u["username"] or u["first_name"] or str(u["user_id"])
+            name = html.escape(str(raw_name))
             if u["username"]:
                 name = f"@{name}"
             dt = datetime.datetime.fromtimestamp(u["first_seen"]).strftime("%d.%m %H:%M")
             premium = " ⭐" if u["is_premium"] else ""
-            ref = f" ← {u['start_param']}" if u["start_param"] else ""
-            lines.append(f"▸ <b>{name}</b>{premium}  {u['language'] or '?'}  {dt}{ref}")
+            lang = html.escape(u["language"] or "?")
+            ref = f" ← {html.escape(u['start_param'])}" if u["start_param"] else ""
+            lines.append(f"▸ <b>{name}</b>{premium}  {lang}  {dt}{ref}")
 
-        text = (
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "    👥  <b>Recent Users</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n\n"
-            + "\n".join(lines)
-        )
+        text = "👥 <b>Recent Users</b>\n\n" + "\n".join(lines)
         await message.edit_text(text, parse_mode="HTML", reply_markup=self._admin_nav("users"))
 
     async def _edit_admin_downloads(self, message: types.Message):
         if not self._stats:
             return
         gs = await self._stats.get_global_stats()
-        platforms = "\n".join(f"  ▸ {p}: <b>{c}</b>" for p, c in gs.top_platforms[:10]) or "  —"
-        formats = "\n".join(f"  ▸ {f}: <b>{c}</b>" for f, c in gs.top_formats) or "  —"
+        platforms = "\n".join(
+            f"  ▸ {html.escape(p)}: <b>{c}</b>" for p, c in gs.top_platforms[:10]
+        ) or "  —"
+        formats = "\n".join(
+            f"  ▸ {html.escape(f)}: <b>{c}</b>" for f, c in gs.top_formats
+        ) or "  —"
 
         text = (
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "    ⬇️  <b>Downloads</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"<b>By platform:</b>\n{platforms}\n\n"
-            f"<b>By format:</b>\n{formats}"
+            "⬇️ <b>Downloads</b>\n\n"
+            f"<b>By platform</b>\n{platforms}\n\n"
+            f"<b>By format</b>\n{formats}"
         )
         await message.edit_text(text, parse_mode="HTML", reply_markup=self._admin_nav("downloads"))
 
@@ -636,7 +611,8 @@ class TelegramPlatform(BasePlatform):
 
         lines = []
         for i, u in enumerate(users, 1):
-            name = u["username"] or u["first_name"] or str(u["user_id"])
+            raw_name = u["username"] or u["first_name"] or str(u["user_id"])
+            name = html.escape(str(raw_name))
             if u["username"]:
                 name = f"@{name}"
             medal = ["🥇", "🥈", "🥉"][i - 1] if i <= 3 else f"{i}."
@@ -644,12 +620,7 @@ class TelegramPlatform(BasePlatform):
                 f"{medal} <b>{name}</b> — {u['downloads']} dl · {_format_size(u['total_bytes'])}"
             )
 
-        text = (
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "    🏆  <b>Top Users</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n\n"
-            + "\n".join(lines)
-        )
+        text = "🏆 <b>Top Users</b>\n\n" + "\n".join(lines)
         await message.edit_text(text, parse_mode="HTML", reply_markup=self._admin_nav("top"))
 
     async def _edit_admin_recent(self, message: types.Message):
@@ -663,21 +634,18 @@ class TelegramPlatform(BasePlatform):
         import datetime
         lines = []
         for d in downloads:
-            title = (d["title"] or "?")[:30]
-            user = f"@{d['username']}" if d["username"] else "anon"
+            title = html.escape((d["title"] or "?")[:30])
+            user = f"@{html.escape(d['username'])}" if d["username"] else "anon"
             dt = datetime.datetime.fromtimestamp(d["at"]).strftime("%H:%M")
             speed = f"{d['time_ms'] / 1000:.1f}s" if d["time_ms"] else "?"
+            platform = html.escape(d["platform"] or "?")
+            fmt = html.escape(d["format"] or "?")
             lines.append(
                 f"▸ {dt}  <b>{title}</b>\n"
-                f"    {d['platform'] or '?'} · {d['format']} · {_format_size(d['filesize'])} · {speed} · {user}"
+                f"    {platform} · {fmt} · {_format_size(d['filesize'])} · {speed} · {user}"
             )
 
-        text = (
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "    🕐  <b>Recent Downloads</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n\n"
-            + "\n".join(lines)
-        )
+        text = "🕐 <b>Recent Downloads</b>\n\n" + "\n".join(lines)
         await message.edit_text(text, parse_mode="HTML", reply_markup=self._admin_nav("recent"))
 
     async def _send_admin_errors(self, message: types.Message):
@@ -693,51 +661,57 @@ class TelegramPlatform(BasePlatform):
             return "Stats not available."
         errors = await self._stats.get_recent_errors(10)
         if not errors:
-            return (
-                "━━━━━━━━━━━━━━━━━━━━\n"
-                "    ✅  <b>No Errors</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━\n\n"
-                "Всё работает штатно."
-            )
+            return "✅ <b>No Errors</b>\n\nВсё работает штатно."
         lines = []
         for e in errors:
-            lines.append(f"▸ <b>{e['platform'] or '?'}</b>: {e['error'][:80]}")
-        return (
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "    🔴  <b>Recent Errors</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n\n"
-            + "\n".join(lines)
-        )
+            platform = html.escape(e["platform"] or "?")
+            err = html.escape((e["error"] or "")[:80])
+            lines.append(f"▸ <b>{platform}</b>: {err}")
+        return "🔴 <b>Recent Errors</b>\n\n" + "\n".join(lines)
 
-    async def _send_user_stats(self, message: types.Message):
-        if self._stats:
-            await self._stats.track_action(message.from_user.id, "stats_view")
-
+    async def _build_user_stats_text(self, user_id: int) -> str:
         if not self._stats:
-            await message.answer("Статистика недоступна.")
-            return
-        user_id = message.from_user.id
+            return "Статистика недоступна."
+
+        await self._stats.track_action(user_id, "stats_view")
         us = await self._stats.get_user_stats(user_id)
         if not us:
-            await message.answer(
-                "━━━━━━━━━━━━━━━━━━━━\n"
-                "    📊  <b>Твоя статистика</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━\n\n"
-                "<i>Пока нет скачиваний. Отправь ссылку!</i>",
-                parse_mode="HTML",
+            return (
+                "📊 <b>Твоя статистика</b>\n\n"
+                "<i>Пока нет скачиваний. Пришли ссылку!</i>"
             )
-            return
 
-        text = (
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "    📊  <b>Твоя статистика</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n\n"
+        fav_platform = html.escape(us.favorite_platform) if us.favorite_platform else "—"
+        fav_format = html.escape(us.favorite_format) if us.favorite_format else "—"
+        return (
+            "📊 <b>Твоя статистика</b>\n\n"
             f"⬇️ Скачиваний: <b>{us.total_downloads}</b>\n"
             f"💾 Объём: <b>{_format_size(us.total_bytes)}</b>\n"
-            f"📍 Любимый источник: <b>{us.favorite_platform or '—'}</b>\n"
-            f"🎬 Любимый формат: <b>{us.favorite_format or '—'}</b>"
+            f"📍 Источник: <b>{fav_platform}</b>\n"
+            f"🎬 Формат: <b>{fav_format}</b>"
         )
+
+    async def _send_user_stats(self, user_id: int, message: types.Message):
+        text = await self._build_user_stats_text(user_id)
         await message.answer(text, parse_mode="HTML")
+
+    async def _edit_menu(
+        self,
+        message: types.Message,
+        text: str,
+        keyboard: InlineKeyboardMarkup,
+    ) -> None:
+        try:
+            if message.photo:
+                await message.edit_caption(
+                    caption=text, parse_mode="HTML", reply_markup=keyboard,
+                )
+            else:
+                await message.edit_text(
+                    text=text, parse_mode="HTML", reply_markup=keyboard,
+                )
+        except Exception:
+            logger.exception("Failed to edit menu")
 
     async def _handle_vod_range(self, message: types.Message):
         user_id = message.from_user.id
@@ -824,7 +798,7 @@ class TelegramPlatform(BasePlatform):
                 )
 
             if not result.success:
-                await status_msg.edit_text(f"❌ {result.error}")
+                await status_msg.edit_text(f"❌ {html.escape(result.error or 'Ошибка')}")
                 return
 
             filesize = result.filesize or 0
@@ -836,11 +810,11 @@ class TelegramPlatform(BasePlatform):
                 self.downloader.cleanup(result)
                 return
 
-            await status_msg.edit_text("📤 <i>Загружаю в Telegram...</i>", parse_mode="HTML")
+            await status_msg.edit_text("📤 <i>Отправляю файл...</i>", parse_mode="HTML")
 
             caption_parts = []
             if result.title:
-                caption_parts.append(f"<b>{result.title}</b>")
+                caption_parts.append(f"<b>{html.escape(result.title)}</b>")
             meta = []
             if result.duration:
                 meta.append(_format_duration(result.duration))
@@ -868,7 +842,7 @@ class TelegramPlatform(BasePlatform):
                 await status_msg.delete()
             except Exception as e:
                 logger.exception("Upload failed")
-                await status_msg.edit_text(f"❌ Ошибка загрузки: {e}")
+                await status_msg.edit_text(f"❌ Ошибка отправки: {html.escape(str(e))}")
             finally:
                 self.downloader.cleanup(result)
 
@@ -881,8 +855,19 @@ class TelegramPlatform(BasePlatform):
         if not accepted:
             await status_msg.edit_text("❌ Очередь заполнена. Попробуй позже.")
 
+    async def _register_bot_commands(self) -> None:
+        try:
+            await self.bot.set_my_commands([
+                BotCommand(command="start", description="Главное меню"),
+                BotCommand(command="stats", description="Моя статистика"),
+                BotCommand(command="help", description="Помощь"),
+            ])
+        except Exception:
+            logger.exception("Failed to register bot commands")
+
     async def start(self) -> None:
         logger.info("Starting Telegram bot...")
+        await self._register_bot_commands()
         await self.dp.start_polling(self.bot)
 
     async def stop(self) -> None:

@@ -25,11 +25,11 @@ write_files:
       [Service]
       Type=simple
       User=saveitdl
-      WorkingDirectory=/opt/saveitdl
+      WorkingDirectory=/opt/saveitdl/repo
       ExecStart=/opt/saveitdl/venv/bin/python main.py
+      EnvironmentFile=/opt/saveitdl/.env
       Restart=always
       RestartSec=10
-      WatchdogSec=300
       Environment=PYTHONUNBUFFERED=1
 
       [Install]
@@ -58,6 +58,8 @@ write_files:
       MAX_WORKERS=4
       QUEUE_SIZE=100
       STATS_DB=/opt/saveitdl/stats.db
+      # Uncomment after running deploy/install-bot-api.sh
+      # BOT_API_URL=http://localhost:8081
 
   - path: /etc/cron.d/saveitdl
     content: |
@@ -71,16 +73,11 @@ write_files:
 runcmd:
   - useradd -r -m -d /opt/saveitdl -s /bin/bash saveitdl
   - mkdir -p /opt/saveitdl/downloads /opt/saveitdl/backups /var/log/saveitdl
-  - chown -R saveitdl:saveitdl /opt/saveitdl /var/log/saveitdl
   - git clone https://github.com/BxdiS/SaveItDL.git /opt/saveitdl/repo
-  - cp /opt/saveitdl/repo/*.py /opt/saveitdl/
-  - cp -r /opt/saveitdl/repo/core /opt/saveitdl/
-  - cp -r /opt/saveitdl/repo/platforms /opt/saveitdl/
-  - cp /opt/saveitdl/repo/requirements.txt /opt/saveitdl/
   - python3 -m venv /opt/saveitdl/venv
   - /opt/saveitdl/venv/bin/pip install --upgrade pip
-  - /opt/saveitdl/venv/bin/pip install -r /opt/saveitdl/requirements.txt
-  - chown -R saveitdl:saveitdl /opt/saveitdl
+  - /opt/saveitdl/venv/bin/pip install -r /opt/saveitdl/repo/requirements.txt
+  - chown -R saveitdl:saveitdl /opt/saveitdl /var/log/saveitdl
   - systemctl daemon-reload
   - systemctl enable saveitdl
   - echo ">>> SaveItDL installed. Edit /opt/saveitdl/.env then run: systemctl start saveitdl"

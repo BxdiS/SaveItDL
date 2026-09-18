@@ -5,12 +5,7 @@ set -e
 cd /opt/saveitdl/repo
 git pull origin main
 
-cp *.py /opt/saveitdl/
-cp -r core /opt/saveitdl/
-cp -r platforms /opt/saveitdl/
-cp requirements.txt /opt/saveitdl/
-
-/opt/saveitdl/venv/bin/pip install -r /opt/saveitdl/requirements.txt -q
+/opt/saveitdl/venv/bin/pip install -r requirements.txt -q
 
 systemctl restart saveitdl
 echo "Updated and restarted."

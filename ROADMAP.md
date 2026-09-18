@@ -16,8 +16,11 @@
 - [x] /adminstats — full admin dashboard
 - [x] /errors — recent download errors
 - [x] Audio metadata embedding (ID3 tags: artist, album, date, genre via mutagen)
-- [x] ReplyKeyboardMarkup — persistent bottom buttons (📊 My Stats, ❓ Help)
-- [x] Beautiful UI: HTML formatting, banners, structured messages, Russian locale
+- [x] ReplyKeyboardMarkup — persistent bottom buttons
+- [x] Banner image + inline menu on /start
+- [x] Bot commands registered via set_my_commands (visible in "/" menu)
+- [x] HTML-escaping for user-supplied strings in messages
+- [x] Local Bot API Server support for 2GB uploads
 - [x] Extended analytics: sessions, premium tracking, start params, user actions, D1 retention, language stats, new users, avg download speed
 
 ### Supported out of the box
@@ -28,45 +31,50 @@ YouTube, TikTok, Instagram + Reels, X.com, SoundCloud, Facebook, VK Video, Rutub
 
 ---
 
-## v1.1 — Smart queue & traffic control
-- [ ] Per-file size limit (configurable, default 200MB for free users)
-- [ ] Per-user daily download limit (10/day free, ~500MB/day)
-- [ ] Monthly traffic budget tracking (3TB cap → admin alert at 80%)
+## v1.1 — Reliability & hardening (next)
+See `REVIEW_LOGIC.md` and `REVIEW_SECURITY.md` for the full list.
+
+- [ ] Per-user rate limiting (1 req / 5 sec) — see REVIEW_SECURITY.md
+- [ ] Per-user download quota (10/day free, ~500MB/day)
+- [ ] Per-file size pre-check (reject huge files before download)
 - [ ] Download timeout: kill stuck jobs after 5 min, free the slot
 - [ ] Fair queue: round-robin per user, one active download per user max
-- [ ] Pre-download size check: reject if estimated filesize > limit
-- [ ] Auto quality cap: if traffic budget low, cap at 720p
-- [ ] Premium tiers: unlimited size, no caption, priority queue, 4K
-- [ ] Rate limiting: 1 req / 5 sec per user
-- [ ] Cooldown message with remaining time
-- [ ] Admin: /setlimit, /ban, /unban, /traffic (current month usage)
+- [ ] Worker pool: graceful shutdown via sentinel, drain queue on stop
+- [ ] Trim callback-payload length (`start_param`, VOD range) to safe bounds
+- [ ] URL allowlist / block internal hostnames (SSRF hardening)
+- [ ] Migrate `_pending_urls` and `_awaiting_range` to SQLite or Redis (survive restarts)
+- [ ] SQLite WAL checkpoint on shutdown
 
-## v1.2 — Extra sources
+## v1.2 — UX polish
+See `REVIEW_UI_UX.md`.
+
+- [ ] Progress bar during download (edit status_msg every N%)
+- [ ] Short video (<60s) → sent as video note (round preview)
+- [ ] Thumbnail preview inside format-selection message
+- [ ] Retry button on download failures
+- [ ] "Cancel current download" button while queued/running
+- [ ] i18n scaffold (RU/EN/ES) via language_code
+- [ ] Web App button for a mini-app stats view (visually distinct blue button)
+- [ ] Reply keyboard: hide once user is comfortable / on demand
+
+## v1.3 — Extra sources
 - [ ] Spotify (spotdl integration)
 - [ ] Yandex Music (cookies auth)
 - [ ] Bluesky (AT Protocol API)
 - [ ] Pinterest, Likee
 - [ ] Admin /setcookies for auth-required sites
 
-## v1.3 — UX improvements
-- [ ] Inline progress bar (▓▓▓░░ 60%)
-- [ ] Short videos (<60s) → video note (circle)
-- [ ] Thumbnail in format selection
-- [ ] /help with full guide
-- [ ] Retry button on failures
-- [ ] "via @SaveItDLbot" caption (viral, free tier only)
-- [ ] Share button after download
-
-## v1.4 — Deploy & ops
+## v1.4 — Deploy & ops (done)
 - [x] Cloud-init script (Ubuntu + Python + ffmpeg + systemd)
-- [x] systemd unit with watchdog
+- [x] systemd unit runs directly from `/opt/saveitdl/repo` (no cp duplication)
+- [x] `deploy/update.sh` = git pull + restart (no manual copying)
 - [x] Logrotate
 - [x] Auto yt-dlp update (weekly cron)
 - [x] Auto temp cleanup (hourly, files >1h old)
 - [x] stats.db backup (daily)
 
 ## v1.5 — Monetization
-- [ ] Telegram Stars payments
+- [ ] Telegram Stars payments (`pay=True` button — natively green)
 - [ ] Premium: no limits, no caption, priority queue, 4K
 - [ ] Referral: invite 3 → +5 downloads/day
 - [ ] /premium command + inline payment
@@ -75,7 +83,7 @@ YouTube, TikTok, Instagram + Reels, X.com, SoundCloud, Facebook, VK Video, Rutub
 ## v1.6 — More bot platforms
 - [ ] Discord adapter (discord.py)
 - [ ] VK bot adapter (vkbottle)
-- [ ] Per-platform file limits (Discord 25MB, Telegram 50MB)
+- [ ] Per-platform file limits (Discord 25MB, Telegram 50MB / 2GB)
 - [ ] Shared stats DB across platforms
 
 ## v1.7 — Growth & SEO
@@ -83,7 +91,7 @@ YouTube, TikTok, Instagram + Reels, X.com, SoundCloud, Facebook, VK Video, Rutub
 - [ ] Bot catalog listings (findmini, toptelegrambots, botlist, botostore)
 - [ ] GitHub README with screenshots + "Try It Now"
 - [ ] Reddit / 4PDA / Habr launch posts
-- [ ] @SaveItDLnews updates channel
+- [ ] @SaveItDL updates channel content plan
 - [ ] Public download counter (trust signal)
 
 ## v2.0 — Scale
