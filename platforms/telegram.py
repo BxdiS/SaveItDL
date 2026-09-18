@@ -4,6 +4,7 @@ import hashlib
 import html
 import logging
 import re
+import time
 from collections import OrderedDict
 from pathlib import Path
 
@@ -14,10 +15,17 @@ from aiogram.types import (
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    LabeledPrice,
+    PreCheckoutQuery,
 )
 
+from config import Limits
 from core.downloader import Downloader
+from core.limits import RateLimiter
 from core.models import DownloadResult, MediaFormat, MediaInfo
+from core.premium import is_premium, premium_expires_days, tariffs
+from core.quota import check_daily_quota
+from core.security import is_safe_url
 from core.stats import StatsDB
 from core.worker_pool import DownloadJob, WorkerPool
 from platforms.base import BasePlatform
@@ -81,11 +89,20 @@ def _is_twitch_vod(url: str) -> bool:
     return bool(TWITCH_VOD_REGEX.search(url))
 
 
-def _build_video_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
+def _build_video_buttons(
+    info: MediaInfo, url_id: str,
+    premium: bool, free_max_h: int,
+    file_limit: int,
+) -> InlineKeyboardMarkup:
     video_formats = []
     seen_quality = set()
     for i, f in enumerate(info.formats):
         if f.is_audio_only:
+            continue
+        h = _quality_sort_key(f.quality)
+        if not premium and h > free_max_h:
+            continue
+        if f.filesize and f.filesize > file_limit:
             continue
         q = str(f.quality)
         if q in seen_quality:
@@ -100,7 +117,7 @@ def _build_video_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
         q = str(f.quality)
         if q.isdigit():
             q = f"{q}p"
-        label = f"🎬 {q}  ·  {f.ext}  ·  {_format_size(f.filesize)}"
+        label = f"🎬 {q}  ·  {_format_size(f.filesize)}"
         rows.append([InlineKeyboardButton(
             text=label,
             callback_data=f"f:{url_id}:v:{i}",
@@ -110,6 +127,10 @@ def _build_video_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🎬 Лучшее видео", callback_data=f"q:{url_id}:video"),
         InlineKeyboardButton(text="🎵 MP3", callback_data=f"q:{url_id}:audio"),
     ])
+    if not premium:
+        rows.append([InlineKeyboardButton(
+            text="⭐ Premium: FHD / 2K / 4K", callback_data="menu:premium",
+        )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -129,7 +150,7 @@ def _build_audio_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
         if q in seen:
             continue
         seen.add(q)
-        label = f"🎵 {q}  ·  {f.ext}  ·  {_format_size(f.filesize)}"
+        label = f"🎵 {q}  ·  {_format_size(f.filesize)}"
         rows.append([InlineKeyboardButton(
             text=label,
             callback_data=f"f:{url_id}:a:{i}",
@@ -180,12 +201,28 @@ HOWTO_TEXT = (
 HELP_TEXT = HOWTO_TEXT  # backwards-compat for /help command
 
 
+PREMIUM_TEXT = (
+    "⭐ <b>SaveItDL Premium</b>\n\n"
+    "<b>Free</b>\n"
+    "▸ До 720p, ролики до 15 минут\n"
+    "▸ 15 файлов / 1 ГБ в сутки\n"
+    "▸ 1 активная загрузка\n\n"
+    "<b>Premium</b>\n"
+    "▸ FHD / 2K / 4K без ограничения длины\n"
+    "▸ 100 файлов / 10 ГБ в сутки\n"
+    "▸ 3 параллельных загрузки, приоритет в очереди\n\n"
+    "Оплата в Telegram Stars. Стоимость ниже:"
+)
+
+
 class TelegramPlatform(BasePlatform):
     name = "telegram"
 
     def __init__(self, token: str, downloader: Downloader, pool: WorkerPool,
                  stats: StatsDB | None = None, admin_id: int | None = None,
-                 api_url: str | None = None):
+                 api_url: str | None = None,
+                 limits: Limits | None = None,
+                 rate_limiter: RateLimiter | None = None):
         super().__init__(token, downloader)
         self._api_url = api_url
         if api_url:
@@ -203,23 +240,58 @@ class TelegramPlatform(BasePlatform):
         self._pool = pool
         self._stats = stats
         self._admin_id = admin_id
-        self._pending_urls: OrderedDict[str, str] = OrderedDict()
+        self._limits = limits or Limits()
+        self._rl = rate_limiter or RateLimiter()
         self._pending_info: OrderedDict[str, MediaInfo] = OrderedDict()
-        self._awaiting_range: dict[int, str] = {}
         self._register_handlers()
 
-    def _store_url(self, url: str, info: MediaInfo | None = None) -> str:
+    async def _store_url(self, url: str, user_id: int,
+                          info: MediaInfo | None = None) -> str:
         uid = _short_id(url)
-        self._pending_urls[uid] = url
         if info:
             self._pending_info[uid] = info
-        while len(self._pending_urls) > MAX_PENDING:
-            k, _ = self._pending_urls.popitem(last=False)
-            self._pending_info.pop(k, None)
+            while len(self._pending_info) > MAX_PENDING:
+                self._pending_info.popitem(last=False)
+        if self._stats:
+            formats = None
+            if info:
+                formats = [
+                    {"format_id": f.format_id, "ext": f.ext,
+                     "quality": f.quality, "filesize": f.filesize,
+                     "is_audio_only": f.is_audio_only}
+                    for f in info.formats
+                ]
+            await self._stats.save_pending_url(uid, user_id, url, formats)
         return uid
 
-    def _get_url(self, uid: str) -> str | None:
-        return self._pending_urls.get(uid)
+    async def _get_url(self, uid: str) -> str | None:
+        if self._stats:
+            row = await self._stats.get_pending_url(uid)
+            if row:
+                return row["url"]
+        return None
+
+    async def _user_is_premium(self, user_id: int) -> bool:
+        if not self._stats:
+            return False
+        row = await self._stats.get_user_row(user_id)
+        return is_premium(row)
+
+    async def _check_rate(self, user_id: int, message: types.Message) -> bool:
+        first_seen = None
+        if self._stats:
+            row = await self._stats.get_user_row(user_id)
+            if row:
+                first_seen = row.get("first_seen")
+        ok, retry = self._rl.check_message(user_id, first_seen)
+        if not ok:
+            try:
+                await message.answer(
+                    f"⏱ Не так быстро. Подожди {int(retry) + 1} сек.",
+                )
+            except Exception:
+                pass
+        return ok
 
     async def _track_user(self, user: types.User, start_param: str | None = None):
         if not self._stats:
@@ -313,6 +385,51 @@ class TelegramPlatform(BasePlatform):
             elif action == "stats":
                 text = await self._build_user_stats_text(callback.from_user.id)
                 await self._edit_menu(callback.message, text, BACK_KEYBOARD)
+            elif action == "premium":
+                await self._send_premium_offer(callback.message, callback.from_user.id)
+
+        @self.dp.callback_query(F.data.startswith("buy:"))
+        async def handle_buy(callback: types.CallbackQuery):
+            await callback.answer()
+            kind = callback.data.split(":", 1)[1]
+            await self._send_invoice(callback.message, callback.from_user.id, kind)
+
+        @self.dp.message(Command("premium"))
+        async def cmd_premium(message: types.Message):
+            await self._track_user(message.from_user)
+            await self._send_premium_offer(message, message.from_user.id, new=True)
+
+        @self.dp.message(Command("grantpremium"))
+        async def cmd_grantpremium(message: types.Message):
+            if not self._is_admin(message.from_user.id):
+                await message.answer("⛔ Только для администратора.")
+                return
+            parts = (message.text or "").split()
+            if len(parts) != 3:
+                await message.answer("Использование: /grantpremium <user_id> <days>")
+                return
+            try:
+                target = int(parts[1])
+                days = int(parts[2])
+            except ValueError:
+                await message.answer("user_id и days должны быть числами.")
+                return
+            if not self._stats:
+                await message.answer("Stats DB не подключена.")
+                return
+            new_until = await self._stats.extend_premium(target, days * 86400)
+            await message.answer(
+                f"✅ Premium для {target} активен до "
+                f"{time.strftime('%d.%m.%Y', time.localtime(new_until))}."
+            )
+
+        @self.dp.pre_checkout_query()
+        async def pre_checkout(q: PreCheckoutQuery):
+            await self.bot.answer_pre_checkout_query(q.id, ok=True)
+
+        @self.dp.message(F.successful_payment)
+        async def on_success_payment(message: types.Message):
+            await self._handle_payment(message)
 
         @self.dp.callback_query(F.data.startswith("adm:"))
         async def handle_admin_nav(callback: types.CallbackQuery):
@@ -339,8 +456,11 @@ class TelegramPlatform(BasePlatform):
             user_id = message.from_user.id
             await self._track_user(message.from_user)
 
-            if user_id in self._awaiting_range:
-                await self._handle_vod_range(message)
+            awaiting = None
+            if self._stats:
+                awaiting = await self._stats.get_awaiting_range(user_id)
+            if awaiting:
+                await self._handle_vod_range(message, awaiting)
                 return
 
             urls = URL_REGEX.findall(message.text or "")
@@ -350,7 +470,14 @@ class TelegramPlatform(BasePlatform):
                     parse_mode="HTML",
                 )
                 return
-            url = urls[0]
+            if not await self._check_rate(user_id, message):
+                return
+
+            url = urls[0].rstrip(".,;!?)")
+
+            if not is_safe_url(url):
+                await message.answer("⛔ Ссылка ведёт во внутреннюю сеть — отклонено.")
+                return
 
             if self._stats:
                 await self._stats.track_action(user_id, "url_sent", url[:200])
@@ -364,13 +491,15 @@ class TelegramPlatform(BasePlatform):
                 await status_msg.edit_text("❌ Не удалось обработать ссылку.")
                 return
 
-            url_id = self._store_url(url, info)
+            url_id = await self._store_url(url, user_id, info)
             duration = info.duration or 0
+            premium_user = await self._user_is_premium(user_id)
 
             safe_title = html.escape(info.title or "Без названия")
 
             if _is_twitch_vod(url) and duration > VOD_DURATION_LIMIT:
-                self._awaiting_range[user_id] = url_id
+                if self._stats:
+                    await self._stats.set_awaiting_range(user_id, url_id)
                 await status_msg.edit_text(
                     f"📺 <b>{safe_title}</b>\n"
                     f"⏱ {_format_duration(duration)} — VOD дольше 30 минут.\n\n"
@@ -404,12 +533,31 @@ class TelegramPlatform(BasePlatform):
             if details:
                 lines.append(" · ".join(details))
 
-            if info.formats:
+            # Free: block long videos (audio always allowed)
+            video_locked_by_duration = (
+                not premium_user
+                and not is_audio
+                and duration > self._limits.free_max_duration_s
+            )
+
+            if video_locked_by_duration:
+                lines.append(
+                    f"\n⚠️ Ролик длиннее {self._limits.free_max_duration_s // 60} мин.\n"
+                    "Скачать в MP3 можно, для видео нужен Premium."
+                )
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🎵 Скачать MP3", callback_data=f"q:{url_id}:audio")],
+                    [InlineKeyboardButton(text="⭐ Premium", callback_data="menu:premium")],
+                ])
+            elif info.formats:
                 lines.append("\n<b>Выбери качество:</b>")
                 if is_audio:
                     kb = _build_audio_buttons(info, url_id)
                 else:
-                    kb = _build_video_buttons(info, url_id)
+                    kb = _build_video_buttons(
+                        info, url_id, premium_user,
+                        self._limits.free_max_height, self._file_limit,
+                    )
             else:
                 if is_audio:
                     kb = InlineKeyboardMarkup(inline_keyboard=[[
@@ -425,31 +573,44 @@ class TelegramPlatform(BasePlatform):
 
         @self.dp.callback_query(F.data.startswith("q:"))
         async def handle_quick_download(callback: types.CallbackQuery):
+            user_id = callback.from_user.id
+            ok, retry = self._rl.check_callback(user_id)
+            if not ok:
+                await callback.answer(f"Подожди {int(retry)+1} сек", show_alert=False)
+                return
             await callback.answer()
             parts = callback.data.split(":")
             if len(parts) < 3:
                 return
             _, url_id, fmt = parts
-            url = self._get_url(url_id)
+            url = await self._get_url(url_id)
             if not url:
                 await callback.message.edit_text("⏳ Ссылка устарела. Отправь заново.")
                 return
             media_format = MediaFormat.AUDIO if fmt == "audio" else MediaFormat.VIDEO
+            info = self._pending_info.get(url_id)
+            if not await self._enforce_tier(callback.message, user_id, info, media_format):
+                return
             if self._stats:
-                await self._stats.track_action(callback.from_user.id, "quality_pick", fmt)
+                await self._stats.track_action(user_id, "quality_pick", fmt)
             await self._start_download(
                 callback.message, url, media_format,
-                user_id=callback.from_user.id, url_id=url_id,
+                user_id=user_id, url_id=url_id,
             )
 
         @self.dp.callback_query(F.data.startswith("f:"))
         async def handle_format_download(callback: types.CallbackQuery):
+            user_id = callback.from_user.id
+            ok, retry = self._rl.check_callback(user_id)
+            if not ok:
+                await callback.answer(f"Подожди {int(retry)+1} сек", show_alert=False)
+                return
             await callback.answer()
             parts = callback.data.split(":")
             if len(parts) < 4:
                 return
             _, url_id, kind, fmt_idx = parts
-            url = self._get_url(url_id)
+            url = await self._get_url(url_id)
             if not url:
                 await callback.message.edit_text("⏳ Ссылка устарела. Отправь заново.")
                 return
@@ -460,28 +621,46 @@ class TelegramPlatform(BasePlatform):
                 try:
                     idx = int(fmt_idx)
                     if 0 <= idx < len(info.formats):
-                        format_id = info.formats[idx].format_id
+                        f = info.formats[idx]
+                        format_id = f.format_id
+                        premium_user = await self._user_is_premium(user_id)
+                        if not premium_user and not f.is_audio_only:
+                            h = _quality_sort_key(f.quality)
+                            if h > self._limits.free_max_height:
+                                await callback.message.edit_text(
+                                    "⭐ Это качество доступно только Premium-пользователям.\n"
+                                    "Команда /premium — открыть тариф.",
+                                    reply_markup=BACK_KEYBOARD,
+                                )
+                                return
                 except (ValueError, IndexError):
                     pass
 
             media_format = MediaFormat.AUDIO if kind == "a" else MediaFormat.VIDEO
+            if not await self._enforce_tier(callback.message, user_id, info, media_format):
+                return
             if self._stats:
-                await self._stats.track_action(callback.from_user.id, "format_pick", f"{kind}:{format_id}")
+                await self._stats.track_action(user_id, "format_pick", f"{kind}:{format_id}")
             await self._start_download(
                 callback.message, url, media_format, format_id,
-                user_id=callback.from_user.id, url_id=url_id,
+                user_id=user_id, url_id=url_id,
             )
 
         @self.dp.callback_query(F.data.startswith("vod:"))
         async def handle_vod_callback(callback: types.CallbackQuery):
+            user_id = callback.from_user.id
+            ok, retry = self._rl.check_callback(user_id)
+            if not ok:
+                await callback.answer(f"Подожди {int(retry)+1} сек", show_alert=False)
+                return
             await callback.answer()
             parts = callback.data.split(":")
             if len(parts) < 3:
                 return
             _, url_id = parts[0], parts[1]
 
-            user_id = callback.from_user.id
-            self._awaiting_range.pop(user_id, None)
+            if self._stats:
+                await self._stats.clear_awaiting_range(user_id)
 
             if parts[2] == "cancel":
                 await callback.message.edit_text("❌ Отменено.")
@@ -489,14 +668,16 @@ class TelegramPlatform(BasePlatform):
 
             start_sec = int(parts[2])
             end_sec = int(parts[3])
-            url = self._get_url(url_id)
+            url = await self._get_url(url_id)
             if not url:
                 await callback.message.edit_text("⏳ Ссылка устарела. Отправь заново.")
+                return
+            if not await self._enforce_tier(callback.message, user_id, None, MediaFormat.VIDEO):
                 return
             await self._start_download(
                 callback.message, url, MediaFormat.VIDEO,
                 download_range=(start_sec, end_sec),
-                user_id=callback.from_user.id, url_id=url_id,
+                user_id=user_id, url_id=url_id,
             )
 
     def _is_admin(self, user_id: int) -> bool:
@@ -714,14 +895,12 @@ class TelegramPlatform(BasePlatform):
         except Exception:
             logger.exception("Failed to edit menu")
 
-    async def _handle_vod_range(self, message: types.Message):
+    async def _handle_vod_range(self, message: types.Message, url_id: str):
         user_id = message.from_user.id
-        url_id = self._awaiting_range.pop(user_id, None)
-        if not url_id:
-            return
-
-        url = self._get_url(url_id)
+        url = await self._get_url(url_id)
         if not url:
+            if self._stats:
+                await self._stats.clear_awaiting_range(user_id)
             await message.answer("⏳ Ссылка устарела. Отправь заново.")
             return
 
@@ -732,14 +911,12 @@ class TelegramPlatform(BasePlatform):
                 "❌ Неверный формат. Используй <code>0:00 - 15:00</code> или <code>1:30:00 - 2:00:00</code>",
                 parse_mode="HTML",
             )
-            self._awaiting_range[user_id] = url_id
             return
 
         start = _parse_timestamp(match.group(1))
         end = _parse_timestamp(match.group(2))
-        if start is None or end is None or end <= start:
+        if start is None or end is None or end <= start or start < 0:
             await message.answer("❌ Неверный диапазон. Конец должен быть после начала.")
-            self._awaiting_range[user_id] = url_id
             return
 
         duration = end - start
@@ -747,15 +924,61 @@ class TelegramPlatform(BasePlatform):
             await message.answer(
                 f"❌ Максимум 30 минут. Ты запросил {_format_duration(duration)}."
             )
-            self._awaiting_range[user_id] = url_id
             return
 
-        url_id = _short_id(url)
+        if self._stats:
+            await self._stats.clear_awaiting_range(user_id)
+        if not await self._enforce_tier(message, user_id, None, MediaFormat.VIDEO):
+            return
         await self._start_download(
             message, url, MediaFormat.VIDEO,
             download_range=(start, end),
-            user_id=message.from_user.id, url_id=url_id,
+            user_id=user_id, url_id=url_id,
         )
+
+    async def _enforce_tier(
+        self,
+        message: types.Message,
+        user_id: int,
+        info: MediaInfo | None,
+        media_format: MediaFormat,
+    ) -> bool:
+        premium_user = await self._user_is_premium(user_id)
+        # Duration cap on free video (audio exempt)
+        if (
+            not premium_user
+            and media_format == MediaFormat.VIDEO
+            and info is not None
+            and info.duration
+            and info.duration > self._limits.free_max_duration_s
+        ):
+            try:
+                await message.edit_text(
+                    f"⭐ Ролики длиннее {self._limits.free_max_duration_s // 60} мин — "
+                    "только Premium. Команда /premium.",
+                    reply_markup=BACK_KEYBOARD,
+                )
+            except Exception:
+                await message.answer(
+                    f"⭐ Ролики длиннее {self._limits.free_max_duration_s // 60} мин — Premium."
+                )
+            return False
+        # Daily quota
+        if self._stats:
+            is_audio = media_format == MediaFormat.AUDIO
+            q = await check_daily_quota(self._stats, user_id, self._limits, is_audio)
+            if not q.allowed:
+                try:
+                    await message.edit_text(
+                        f"⛔ {q.reason}\n\n"
+                        f"Использовано сегодня: {q.files_used}/{q.files_limit} файлов, "
+                        f"{q.bytes_used / (1024**3):.2f} ГБ.\n"
+                        "Купить Premium: /premium",
+                    )
+                except Exception:
+                    await message.answer(f"⛔ {q.reason}")
+                return False
+        return True
 
     async def _start_download(
         self,
@@ -767,10 +990,15 @@ class TelegramPlatform(BasePlatform):
         user_id: int | None = None,
         url_id: str | None = None,
     ):
+        premium_user = False
+        if user_id and self._stats:
+            premium_user = await self._user_is_premium(user_id)
+
         queue_pos = self._pool.queue_size
         active = self._pool.active_downloads
         if queue_pos > 0 or active >= self._pool._max_workers:
-            status_text = f"⏳ Позиция в очереди: {queue_pos + 1} ({active} активных)..."
+            tag = " ⭐" if premium_user else ""
+            status_text = f"⏳ Позиция в очереди: {queue_pos + 1}{tag} ({active} активных)..."
         else:
             status_text = "⬇️ <i>Скачиваю...</i>"
 
@@ -847,7 +1075,10 @@ class TelegramPlatform(BasePlatform):
             finally:
                 self.downloader.cleanup(result)
 
-        job = DownloadJob(url=url, media_format=media_format, callback=on_complete)
+        job = DownloadJob(
+            url=url, media_format=media_format, callback=on_complete,
+            user_id=user_id, is_premium=premium_user,
+        )
         if format_id:
             job.format_id = format_id
         if download_range:
@@ -856,11 +1087,106 @@ class TelegramPlatform(BasePlatform):
         if not accepted:
             await status_msg.edit_text("❌ Очередь заполнена. Попробуй позже.")
 
+    async def _send_premium_offer(
+        self, message: types.Message, user_id: int, new: bool = False
+    ) -> None:
+        text = PREMIUM_TEXT
+        if self._stats:
+            row = await self._stats.get_user_row(user_id)
+            days = premium_expires_days(row)
+            if days:
+                text = (
+                    f"⭐ <b>Premium активен ещё {days} дн.</b>\n\n"
+                    "Можно продлить — новые дни добавятся к текущему сроку."
+                )
+        tar = tariffs(
+            self._limits.stars_month, self._limits.stars_year, self._limits.stars_5gb
+        )
+        rows = [[InlineKeyboardButton(
+            text=f"{t.label}  —  {t.stars} ⭐",
+            callback_data=f"buy:{t.kind}",
+        )] for t in tar]
+        rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu:main")])
+        kb = InlineKeyboardMarkup(inline_keyboard=rows)
+        if new:
+            await message.answer(text, parse_mode="HTML", reply_markup=kb)
+        else:
+            await self._edit_menu(message, text, kb)
+
+    async def _send_invoice(
+        self, message: types.Message, user_id: int, kind: str
+    ) -> None:
+        pricing = {
+            "month": (self._limits.stars_month, "SaveItDL Premium — 30 дней",
+                      "Premium-доступ на 30 дней: FHD/2K/4K, увеличенные лимиты."),
+            "year": (self._limits.stars_year, "SaveItDL Premium — 12 месяцев",
+                     "Premium на год со скидкой."),
+            "5gb": (self._limits.stars_5gb, "+5 ГБ трафика",
+                    "Разовое пополнение: +5 ГБ к дневной квоте (не сгорают)."),
+        }
+        if kind not in pricing:
+            await message.answer("Неизвестный тариф.")
+            return
+        stars, title, desc = pricing[kind]
+        payload = f"premium:{kind}:{user_id}:{int(time.time())}"
+        try:
+            await self.bot.send_invoice(
+                chat_id=message.chat.id,
+                title=title,
+                description=desc,
+                payload=payload,
+                provider_token="",  # empty for Telegram Stars
+                currency="XTR",
+                prices=[LabeledPrice(label=title, amount=stars)],
+            )
+        except Exception as e:
+            logger.exception("Failed to send invoice")
+            await message.answer(f"❌ Не удалось создать счёт: {html.escape(str(e))}")
+
+    async def _handle_payment(self, message: types.Message) -> None:
+        sp = message.successful_payment
+        if not sp or not self._stats:
+            return
+        payload = sp.invoice_payload or ""
+        parts = payload.split(":")
+        if len(parts) < 3 or parts[0] != "premium":
+            logger.warning("Unexpected payment payload: %s", payload)
+            return
+        kind = parts[1]
+        user_id = message.from_user.id
+        stars = int(sp.total_amount)
+        charge_id = sp.telegram_payment_charge_id
+
+        await self._stats.record_payment(user_id, kind, stars, charge_id)
+
+        if kind == "month":
+            new_until = await self._stats.extend_premium(user_id, 30 * 86400)
+            await message.answer(
+                f"✅ Premium активен до "
+                f"{time.strftime('%d.%m.%Y', time.localtime(new_until))}. Спасибо!"
+            )
+        elif kind == "year":
+            new_until = await self._stats.extend_premium(user_id, 365 * 86400)
+            await message.answer(
+                f"✅ Premium активен до "
+                f"{time.strftime('%d.%m.%Y', time.localtime(new_until))}. Спасибо!"
+            )
+        elif kind == "5gb":
+            total = await self._stats.add_bonus_bytes(
+                user_id, self._limits.premium_bonus_bytes_5gb,
+            )
+            await message.answer(
+                f"✅ Начислено +5 ГБ. Доступный запас: {total / (1024**3):.1f} ГБ."
+            )
+        else:
+            await message.answer("✅ Оплата получена. Спасибо!")
+
     async def _register_bot_commands(self) -> None:
         try:
             await self.bot.set_my_commands([
                 BotCommand(command="start", description="Главное меню"),
                 BotCommand(command="stats", description="Моя статистика"),
+                BotCommand(command="premium", description="⭐ Premium"),
                 BotCommand(command="help", description="Помощь"),
             ])
         except Exception:
@@ -872,4 +1198,8 @@ class TelegramPlatform(BasePlatform):
         await self.dp.start_polling(self.bot)
 
     async def stop(self) -> None:
+        try:
+            await self.dp.stop_polling()
+        except Exception:
+            pass
         await self.bot.session.close()

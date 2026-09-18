@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+START_PARAM_MAX = 64
+PENDING_TTL_S = 24 * 3600
+AWAITING_TTL_S = 15 * 60
 
 
 @dataclass
@@ -64,7 +69,32 @@ class StatsDB:
                     start_param TEXT,
                     first_seen REAL NOT NULL,
                     last_active REAL NOT NULL,
-                    total_sessions INTEGER DEFAULT 1
+                    total_sessions INTEGER DEFAULT 1,
+                    premium_until REAL DEFAULT 0,
+                    bonus_bytes INTEGER DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS pending_urls (
+                    url_id TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    url TEXT NOT NULL,
+                    formats_json TEXT,
+                    created_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS awaiting_range (
+                    user_id INTEGER PRIMARY KEY,
+                    url_id TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS payments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    kind TEXT NOT NULL,
+                    stars INTEGER NOT NULL,
+                    charge_id TEXT,
+                    created_at REAL NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS downloads (
@@ -107,6 +137,8 @@ class StatsDB:
             ("is_premium", "INTEGER DEFAULT 0"),
             ("start_param", "TEXT"),
             ("total_sessions", "INTEGER DEFAULT 1"),
+            ("premium_until", "REAL DEFAULT 0"),
+            ("bonus_bytes", "INTEGER DEFAULT 0"),
         ]:
             if col not in cols:
                 conn.execute(f"ALTER TABLE users ADD COLUMN {col} {typ}")
@@ -128,6 +160,8 @@ class StatsDB:
 
     def _track_user_sync(self, user_id, username, first_name, last_name,
                           language_code, is_premium, start_param, now):
+        if start_param:
+            start_param = start_param[:START_PARAM_MAX]
         with self._conn() as conn:
             existing = conn.execute(
                 "SELECT first_seen, last_active FROM users WHERE user_id = ?",
@@ -448,3 +482,240 @@ class StatsDB:
                 FROM downloads WHERE success = 1 AND created_at > ?
                 GROUP BY day ORDER BY day
             """, (cutoff,)).fetchall()
+
+    # ---- premium / quotas ----
+
+    async def get_user_row(self, user_id: int) -> dict | None:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_user_row_sync, user_id)
+
+    def _get_user_row_sync(self, user_id: int) -> dict | None:
+        with self._conn() as conn:
+            r = conn.execute(
+                "SELECT user_id, username, first_seen, premium_until, "
+                "bonus_bytes FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            if not r:
+                return None
+            return {
+                "user_id": r[0], "username": r[1], "first_seen": r[2],
+                "premium_until": r[3] or 0.0, "bonus_bytes": r[4] or 0,
+            }
+
+    async def get_user_usage_today(self, user_id: int) -> tuple[int, int]:
+        """Returns (files_today, bytes_today) for successful downloads."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._usage_today_sync, user_id)
+
+    def _usage_today_sync(self, user_id: int) -> tuple[int, int]:
+        day_ago = time.time() - 86400
+        with self._conn() as conn:
+            r = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(filesize), 0) FROM downloads "
+                "WHERE user_id = ? AND success = 1 AND created_at > ?",
+                (user_id, day_ago),
+            ).fetchone()
+            return (int(r[0] or 0), int(r[1] or 0))
+
+    async def set_premium(self, user_id: int, until_ts: float) -> None:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._set_premium_sync, user_id, until_ts)
+
+    def _set_premium_sync(self, user_id: int, until_ts: float) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE users SET premium_until = ? WHERE user_id = ?",
+                (until_ts, user_id),
+            )
+
+    async def extend_premium(self, user_id: int, add_seconds: float) -> float:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, self._extend_premium_sync, user_id, add_seconds
+        )
+
+    def _extend_premium_sync(self, user_id: int, add_seconds: float) -> float:
+        now = time.time()
+        with self._conn() as conn:
+            r = conn.execute(
+                "SELECT premium_until FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            current = float(r[0]) if r and r[0] else 0.0
+            base = max(current, now)
+            new_until = base + add_seconds
+            conn.execute(
+                "UPDATE users SET premium_until = ? WHERE user_id = ?",
+                (new_until, user_id),
+            )
+        return new_until
+
+    async def add_bonus_bytes(self, user_id: int, add_bytes: int) -> int:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, self._add_bonus_sync, user_id, add_bytes
+        )
+
+    def _add_bonus_sync(self, user_id: int, add_bytes: int) -> int:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE users SET bonus_bytes = COALESCE(bonus_bytes, 0) + ? "
+                "WHERE user_id = ?", (add_bytes, user_id),
+            )
+            r = conn.execute(
+                "SELECT bonus_bytes FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            return int(r[0] or 0)
+
+    async def consume_bonus_bytes(self, user_id: int, used: int) -> None:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._consume_bonus_sync, user_id, used)
+
+    def _consume_bonus_sync(self, user_id: int, used: int) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE users SET bonus_bytes = MAX(0, COALESCE(bonus_bytes,0) - ?) "
+                "WHERE user_id = ?", (used, user_id),
+            )
+
+    async def record_payment(
+        self, user_id: int, kind: str, stars: int, charge_id: str | None = None
+    ) -> None:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None, self._record_payment_sync, user_id, kind, stars, charge_id
+        )
+
+    def _record_payment_sync(self, user_id, kind, stars, charge_id):
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO payments (user_id, kind, stars, charge_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (user_id, kind, stars, charge_id, time.time()),
+            )
+
+    async def revenue_stats(self) -> dict:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._revenue_sync)
+
+    def _revenue_sync(self) -> dict:
+        day_ago = time.time() - 86400
+        with self._conn() as conn:
+            total = conn.execute(
+                "SELECT COALESCE(SUM(stars), 0), COUNT(*) FROM payments"
+            ).fetchone()
+            today = conn.execute(
+                "SELECT COALESCE(SUM(stars), 0), COUNT(*) FROM payments "
+                "WHERE created_at > ?", (day_ago,),
+            ).fetchone()
+            return {
+                "total_stars": int(total[0] or 0),
+                "total_count": int(total[1] or 0),
+                "today_stars": int(today[0] or 0),
+                "today_count": int(today[1] or 0),
+            }
+
+    # ---- pending URLs ----
+
+    async def save_pending_url(
+        self, url_id: str, user_id: int, url: str, formats: list | None = None
+    ) -> None:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None, self._save_pending_sync, url_id, user_id, url, formats
+        )
+
+    def _save_pending_sync(self, url_id, user_id, url, formats):
+        payload = json.dumps(formats) if formats else None
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO pending_urls "
+                "(url_id, user_id, url, formats_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                (url_id, user_id, url, payload, time.time()),
+            )
+
+    async def get_pending_url(self, url_id: str) -> dict | None:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_pending_sync, url_id)
+
+    def _get_pending_sync(self, url_id: str) -> dict | None:
+        cutoff = time.time() - PENDING_TTL_S
+        with self._conn() as conn:
+            r = conn.execute(
+                "SELECT url, user_id, formats_json, created_at "
+                "FROM pending_urls WHERE url_id = ? AND created_at > ?",
+                (url_id, cutoff),
+            ).fetchone()
+            if not r:
+                return None
+            formats = json.loads(r[2]) if r[2] else None
+            return {
+                "url": r[0], "user_id": r[1],
+                "formats": formats, "created_at": r[3],
+            }
+
+    async def cleanup_pending(self) -> int:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._cleanup_pending_sync)
+
+    def _cleanup_pending_sync(self) -> int:
+        cutoff = time.time() - PENDING_TTL_S
+        cutoff_r = time.time() - AWAITING_TTL_S
+        with self._conn() as conn:
+            n1 = conn.execute(
+                "DELETE FROM pending_urls WHERE created_at < ?", (cutoff,)
+            ).rowcount
+            n2 = conn.execute(
+                "DELETE FROM awaiting_range WHERE created_at < ?", (cutoff_r,)
+            ).rowcount
+            return int(n1 + n2)
+
+    async def set_awaiting_range(self, user_id: int, url_id: str) -> None:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None, self._set_awaiting_sync, user_id, url_id
+        )
+
+    def _set_awaiting_sync(self, user_id, url_id):
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO awaiting_range "
+                "(user_id, url_id, created_at) VALUES (?, ?, ?)",
+                (user_id, url_id, time.time()),
+            )
+
+    async def get_awaiting_range(self, user_id: int) -> str | None:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_awaiting_sync, user_id)
+
+    def _get_awaiting_sync(self, user_id: int) -> str | None:
+        cutoff = time.time() - AWAITING_TTL_S
+        with self._conn() as conn:
+            r = conn.execute(
+                "SELECT url_id FROM awaiting_range "
+                "WHERE user_id = ? AND created_at > ?",
+                (user_id, cutoff),
+            ).fetchone()
+            return r[0] if r else None
+
+    async def clear_awaiting_range(self, user_id: int) -> None:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._clear_awaiting_sync, user_id)
+
+    def _clear_awaiting_sync(self, user_id: int):
+        with self._conn() as conn:
+            conn.execute(
+                "DELETE FROM awaiting_range WHERE user_id = ?", (user_id,)
+            )
+
+    # ---- shutdown ----
+
+    async def wal_checkpoint(self) -> None:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._wal_checkpoint_sync)
+
+    def _wal_checkpoint_sync(self) -> None:
+        try:
+            with self._conn() as conn:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception:
+            pass
