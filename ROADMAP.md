@@ -31,19 +31,28 @@ YouTube, TikTok, Instagram + Reels, X.com, SoundCloud, Facebook, VK Video, Rutub
 
 ---
 
-## v1.1 — Reliability & hardening (next)
+## v1.1 — Reliability & hardening (done)
 See `REVIEW_LOGIC.md` and `REVIEW_SECURITY.md` for the full list.
 
-- [ ] Per-user rate limiting (1 req / 5 sec) — see REVIEW_SECURITY.md
-- [ ] Per-user download quota (10/day free, ~500MB/day)
-- [ ] Per-file size pre-check (reject huge files before download)
-- [ ] Download timeout: kill stuck jobs after 5 min, free the slot
-- [ ] Fair queue: round-robin per user, one active download per user max
-- [ ] Worker pool: graceful shutdown via sentinel, drain queue on stop
-- [ ] Trim callback-payload length (`start_param`, VOD range) to safe bounds
-- [ ] URL allowlist / block internal hostnames (SSRF hardening)
-- [ ] Migrate `_pending_urls` and `_awaiting_range` to SQLite or Redis (survive restarts)
-- [ ] SQLite WAL checkpoint on shutdown
+- [x] Per-user rate limiting (5s interval, burst 3/10s, callbacks 2s, new users 10s)
+- [x] Per-user daily quota (free 15 files / 1 GB, premium 100 / 10 GB, audio exempt from bytes cap)
+- [x] Per-file size pre-check via yt-dlp format filesize (video button hidden when > TG limit)
+- [x] Download timeout: kill stuck jobs after 5 min, callback fires with error
+- [x] Fair queue: premium priority with 1-in-N free bypass; per-user cap (free 1, premium 3)
+- [x] Worker pool: sentinel shutdown, drain active tasks with timeout
+- [x] Trim `start_param` to 64 chars in DB
+- [x] SSRF hardening: block RFC1918 / loopback / link-local / metadata hosts
+- [x] `pending_urls` and `awaiting_range` persisted in SQLite with TTL
+- [x] SQLite `WAL checkpoint(TRUNCATE)` on shutdown
+
+## v1.5 — Monetization (in progress)
+- [x] Telegram Stars payments (pay=True button)
+- [x] Premium: no video-length limit, up to 4K, priority queue, higher quota
+- [x] Buy extra 5 GB pack (bonus_bytes, persistent)
+- [x] `/premium` command with inline payment
+- [x] `/grantpremium <user_id> <days>` admin command
+- [ ] Referral: invite 3 → +5 downloads/day
+- [ ] Revenue tracking in /adminstats view
 
 ## v1.2 — UX polish
 See `REVIEW_UI_UX.md`.
@@ -73,12 +82,6 @@ See `REVIEW_UI_UX.md`.
 - [x] Auto temp cleanup (hourly, files >1h old)
 - [x] stats.db backup (daily)
 
-## v1.5 — Monetization
-- [ ] Telegram Stars payments (`pay=True` button — natively green)
-- [ ] Premium: no limits, no caption, priority queue, 4K
-- [ ] Referral: invite 3 → +5 downloads/day
-- [ ] /premium command + inline payment
-- [ ] Revenue tracking in /adminstats
 
 ## v1.6 — More bot platforms
 - [ ] Discord adapter (discord.py)

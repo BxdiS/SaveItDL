@@ -5,6 +5,7 @@ import sys
 
 from config import Config
 from core.downloader import Downloader
+from core.limits import RateLimiter
 from core.notifier import AdminNotifier, AlertLevel
 from core.stats import StatsDB
 from core.worker_pool import WorkerPool
@@ -41,7 +42,7 @@ async def run_platform_isolated(
             return
         except asyncio.CancelledError:
             logger.info("Platform %s shutting down", name)
-            return
+            raise
         except Exception as e:
             attempt += 1
             delay = RESTART_DELAY_BASE * (2 ** (attempt - 1))
@@ -65,7 +66,6 @@ async def run_platform_isolated(
 
 
 async def monitor_health(pool: WorkerPool, notifier: AdminNotifier, temp_dir: str):
-    error_window: list[bool] = []
     while True:
         await asyncio.sleep(60)
         try:
@@ -74,10 +74,22 @@ async def monitor_health(pool: WorkerPool, notifier: AdminNotifier, temp_dir: st
             if free_mb < 500:
                 await notifier.disk_space_low(free_mb)
 
-            if pool.queue_size >= pool._queue.maxsize * 0.9:
+            if pool.queue_size >= pool._queue_max * 0.9:
                 await notifier.worker_pool_full()
         except Exception:
             logger.exception("Health monitor error")
+
+
+async def maintenance(stats: StatsDB, rl: RateLimiter):
+    while True:
+        await asyncio.sleep(600)
+        try:
+            n = await stats.cleanup_pending()
+            if n:
+                logger.info("Cleaned %d stale pending entries", n)
+            rl.sweep()
+        except Exception:
+            logger.exception("Maintenance loop error")
 
 
 async def main():
@@ -89,6 +101,18 @@ async def main():
         downloader=downloader,
         max_workers=cfg.max_workers,
         queue_size=cfg.queue_size,
+        free_concurrent=cfg.limits.free_concurrent,
+        premium_concurrent=cfg.limits.premium_concurrent,
+        priority_free_every=cfg.limits.priority_free_every,
+        download_timeout_s=cfg.limits.download_timeout_s,
+    )
+    rl = RateLimiter(
+        interval_s=cfg.limits.rate_interval_s,
+        burst_max=cfg.limits.burst_max,
+        burst_window_s=cfg.limits.burst_window_s,
+        callback_interval_s=cfg.limits.callback_interval_s,
+        new_user_interval_s=cfg.limits.new_user_interval_s,
+        new_user_age_s=cfg.limits.new_user_age_h * 3600,
     )
 
     tokens = {
@@ -96,15 +120,21 @@ async def main():
         "discord": cfg.discord_token,
     }
 
-    def make_tg_factory(dl, p, n, s, aid, api_url):
+    def make_tg_factory(dl, p, n, s, aid, api_url, limits, rate_limiter):
         def factory(token):
-            platform = TelegramPlatform(token, dl, p, stats=s, admin_id=aid, api_url=api_url)
+            platform = TelegramPlatform(
+                token, dl, p, stats=s, admin_id=aid, api_url=api_url,
+                limits=limits, rate_limiter=rate_limiter,
+            )
             n.set_bot(platform.bot)
             return platform
         return factory
 
     platform_factories = {
-        "telegram": make_tg_factory(downloader, pool, notifier, stats, cfg.admin_id, cfg.bot_api_url),
+        "telegram": make_tg_factory(
+            downloader, pool, notifier, stats, cfg.admin_id,
+            cfg.bot_api_url, cfg.limits, rl,
+        ),
     }
 
     tasks = []
@@ -129,14 +159,29 @@ async def main():
     bg_tasks = [
         asyncio.create_task(pool.start()),
         asyncio.create_task(monitor_health(pool, notifier, cfg.temp_dir)),
+        asyncio.create_task(maintenance(stats, rl)),
     ]
     try:
         await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        pass
     finally:
+        logger.info("Shutting down worker pool...")
+        try:
+            await asyncio.wait_for(pool.stop(), timeout=35)
+        except Exception:
+            logger.exception("pool.stop error")
         for t in bg_tasks:
             t.cancel()
         await asyncio.gather(*bg_tasks, return_exceptions=True)
+        try:
+            await stats.wal_checkpoint()
+        except Exception:
+            logger.exception("WAL checkpoint failed")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
