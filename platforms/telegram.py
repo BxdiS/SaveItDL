@@ -146,6 +146,7 @@ def _build_audio_buttons(info: MediaInfo, url_id: str) -> InlineKeyboardMarkup:
 
 BANNER_PATH = Path(__file__).resolve().parent.parent / "assets" / "banner.jpg"
 CHANNEL_URL = "https://t.me/SaveItDL"
+HELP_URL = "https://t.me/SaveItDL?direct"
 
 WELCOME_TEXT = (
     "🎬 <b>Welcome to the SaveItDL</b>\n\n"
@@ -157,7 +158,7 @@ WELCOME_KEYBOARD = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🚀 Как пользоваться?", callback_data="menu:howto")],
     [
         InlineKeyboardButton(text="📊 Статистика", callback_data="menu:stats"),
-        InlineKeyboardButton(text="💬 Помощь", url=CHANNEL_URL),
+        InlineKeyboardButton(text="💬 Помощь", url=HELP_URL),
     ],
 ])
 
